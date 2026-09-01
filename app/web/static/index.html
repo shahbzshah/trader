@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Trader Dashboard</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --panel-2: #1c232c;
+    --border: #2a313a;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --orange: #d29922;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 14px;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: 0.3px; }
+  header .meta { color: var(--muted); font-size: 12px; margin-left: 8px; }
+  .toolbar { display: flex; gap: 8px; align-items: center; }
+  button {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 13px;
+    font-family: inherit;
+  }
+  button:hover { background: #232a33; }
+  button.danger { color: var(--red); border-color: #4a2a2a; }
+  button.danger:hover { background: #2a1a1a; }
+  button.success { color: var(--green); border-color: #2a4a2e; }
+  button.success:hover { background: #1a2a1d; }
+  .kill-banner {
+    display: none;
+    background: var(--red); color: white; padding: 10px 20px; font-weight: 600;
+    text-align: center;
+  }
+  .kill-banner.active { display: block; }
+  main {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+    padding: 20px;
+  }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px;
+  }
+  .card h2 { margin: 0 0 12px 0; font-size: 13px; text-transform: uppercase;
+              letter-spacing: 0.5px; color: var(--muted); }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 24px; }
+  .kv { display: flex; justify-content: space-between; padding: 4px 0;
+        border-bottom: 1px dashed #21272e; }
+  .kv:last-child { border-bottom: none; }
+  .kv .k { color: var(--muted); }
+  .kv .v { font-variant-numeric: tabular-nums; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px;
+          font-size: 11px; font-weight: 600; }
+  .pill.demo { background: #1f3a52; color: var(--accent); }
+  .pill.real { background: #4a2a2a; color: var(--red); }
+  .pill.live { background: #1a3a1d; color: var(--green); }
+  .pill.dead { background: #3a3a3a; color: var(--muted); }
+  .pill.kill { background: var(--red); color: white; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 11px;
+        text-transform: uppercase; letter-spacing: 0.5px; }
+  td.num { text-align: right; }
+  tr.disapproved td { color: var(--muted); }
+  .pos { color: var(--green); }
+  .neg { color: var(--red); }
+  .chart-wrap { position: relative; width: 100%; height: 240px; }
+  canvas { width: 100%; height: 100%; display: block; }
+  footer { padding: 12px 20px; color: var(--muted); font-size: 11px;
+           text-align: center; border-top: 1px solid var(--border); }
+  .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
+  .links a { color: var(--accent); text-decoration: none; margin-right: 12px; }
+  .links a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Trader Dashboard</h1>
+    <span class="meta" id="ts">—</span>
+    <span class="meta" id="mode"></span>
+    <span class="meta" id="mt5"></span>
+  </div>
+  <div class="toolbar">
+    <button id="refresh" type="button">Refresh</button>
+    <button id="resume" class="success" type="button">Resume</button>
+    <button id="kill" class="danger" type="button">Kill Switch</button>
+  </div>
+</header>
+<div id="banner" class="kill-banner">⛔ KILL SWITCH ENGAGED — NO NEW ORDERS</div>
+<main>
+  <section class="card" id="account">
+    <h2>Account</h2>
+    <div id="account-content"><div class="empty">Loading…</div></div>
+  </section>
+  <section class="card" id="today">
+    <h2>Today</h2>
+    <div id="today-content"><div class="empty">Loading…</div></div>
+  </section>
+  <section class="card" id="positions">
+    <h2>Open Positions</h2>
+    <div id="positions-content"><div class="empty">Loading…</div></div>
+  </section>
+  <section class="card" id="decisions">
+    <h2>Recent Decisions</h2>
+    <div id="decisions-content"><div class="empty">Loading…</div></div>
+  </section>
+  <section class="card" id="equity" style="grid-column: 1 / -1;">
+    <h2>Equity (last 7 days)</h2>
+    <div class="chart-wrap"><canvas id="equity-canvas"></canvas></div>
+  </section>
+  <section class="card" id="orders" style="grid-column: 1 / -1;">
+    <h2>Recent Orders</h2>
+    <div id="orders-content"><div class="empty">Loading…</div></div>
+    <div class="links" style="margin-top: 8px;">
+      <a href="/api/state" target="_blank">/api/state</a>
+      <a href="/api/decisions" target="_blank">/api/decisions</a>
+      <a href="/api/equity" target="_blank">/api/equity</a>
+      <a href="/api/orders" target="_blank">/api/orders</a>
+    </div>
+  </section>
+</main>
+<footer>
+  <span>Auto-refresh every 10s · demo account only · built for personal trading</span>
+</footer>
+<script>
+const REFRESH_MS = 10000;
+const fmt = (v, d = 2) => (v === null || v === undefined) ? "—" :
+  Number(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+const fmtInt = (v) => (v === null || v === undefined) ? "—" : Number(v).toLocaleString();
+const ts = (s) => {
+  if (!s) return "—";
+  const d = new Date(s * 1000);
+  return d.toLocaleString();
+};
+const cls = (n) => (n > 0 ? "pos" : (n < 0 ? "neg" : ""));
+
+async function getJSON(url) {
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) throw new Error(`${url} -> ${r.status}`);
+  return await r.json();
+}
+async function postJSON(url) {
+  const r = await fetch(url, { method: "POST" });
+  if (!r.ok) throw new Error(`${url} -> ${r.status}`);
+  return await r.json();
+}
+
+function renderAccount(acc, kill, mt5) {
+  document.getElementById("ts").textContent = new Date().toLocaleString();
+  const pill = document.getElementById("mt5");
+  pill.innerHTML = mt5
+    ? '<span class="pill live">MT5 live</span>'
+    : '<span class="pill dead">MT5 offline</span>';
+  const banner = document.getElementById("banner");
+  banner.classList.toggle("active", !!kill);
+  if (!acc) {
+    document.getElementById("account-content").innerHTML =
+      '<div class="empty">MT5 terminal not running. Open MetaTrader 5 and refresh.</div>';
+    document.getElementById("mode").innerHTML = "";
+    return;
+  }
+  const modePill = acc.trade_mode === "demo"
+    ? '<span class="pill demo">demo</span>'
+    : '<span class="pill real">real</span>';
+  document.getElementById("mode").innerHTML = modePill;
+  const html = `
+    <div class="grid-2">
+      <div class="kv"><span class="k">Login</span><span class="v">${acc.login}</span></div>
+      <div class="kv"><span class="k">Server</span><span class="v">${acc.server}</span></div>
+      <div class="kv"><span class="k">Currency</span><span class="v">${acc.currency}</span></div>
+      <div class="kv"><span class="k">Leverage</span><span class="v">1:${acc.leverage}</span></div>
+      <div class="kv"><span class="k">Balance</span><span class="v">${fmt(acc.balance)}</span></div>
+      <div class="kv"><span class="k">Equity</span><span class="v">${fmt(acc.equity)}</span></div>
+      <div class="kv"><span class="k">Margin</span><span class="v">${fmt(acc.margin)}</span></div>
+      <div class="kv"><span class="k">Free margin</span><span class="v">${fmt(acc.free_margin)}</span></div>
+    </div>`;
+  document.getElementById("account-content").innerHTML = html;
+}
+
+function renderToday(today) {
+  const html = `
+    <div class="grid-2">
+      <div class="kv"><span class="k">Decisions</span><span class="v">${fmtInt(today.decision_count)}</span></div>
+      <div class="kv"><span class="k">Approved</span><span class="v pos">${fmtInt(today.approved)}</span></div>
+      <div class="kv"><span class="k">Rejected</span><span class="v neg">${fmtInt(today.rejected)}</span></div>
+    </div>`;
+  document.getElementById("today-content").innerHTML = html;
+}
+
+function renderPositions(positions) {
+  if (!positions || !positions.length) {
+    document.getElementById("positions-content").innerHTML = '<div class="empty">No open positions.</div>';
+    return;
+  }
+  const rows = positions.map(p => {
+    const clsP = cls(p.profit);
+    return `<tr>
+      <td>${p.ticket}</td>
+      <td>${p.symbol}</td>
+      <td>${p.direction}</td>
+      <td class="num">${fmt(p.volume, 2)}</td>
+      <td class="num">${fmt(p.price_open, 5)}</td>
+      <td class="num">${fmt(p.sl, 5)}</td>
+      <td class="num">${fmt(p.tp, 5)}</td>
+      <td class="num ${clsP}">${fmt(p.profit)}</td>
+    </tr>`;
+  }).join("");
+  document.getElementById("positions-content").innerHTML = `
+    <table>
+      <thead><tr>
+        <th>Ticket</th><th>Symbol</th><th>Side</th>
+        <th class="num">Lots</th><th class="num">Open</th>
+        <th class="num">SL</th><th class="num">TP</th><th class="num">P/L</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function renderDecisions(decisions) {
+  if (!decisions || !decisions.length) {
+    document.getElementById("decisions-content").innerHTML = '<div class="empty">No decisions yet.</div>';
+    return;
+  }
+  const rows = decisions.slice(0, 25).map(d => {
+    const reason = (d.reasoning || "").slice(0, 80);
+    const status = d.approved
+      ? '<span class="pill live">approved</span>'
+      : '<span class="pill kill">rejected</span>';
+    return `<tr class="${d.approved ? '' : 'disapproved'}">
+      <td>${ts(d.ts)}</td>
+      <td>${d.symbol}</td>
+      <td>${d.action}</td>
+      <td>${d.playbook || "—"}</td>
+      <td class="num">${fmt(d.confidence, 2)}</td>
+      <td>${status}</td>
+      <td>${reason}</td>
+    </tr>`;
+  }).join("");
+  document.getElementById("decisions-content").innerHTML = `
+    <table>
+      <thead><tr>
+        <th>Time</th><th>Symbol</th><th>Action</th><th>Playbook</th>
+        <th class="num">Conf.</th><th>Status</th><th>Reasoning</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function renderOrders(orders) {
+  if (!orders || !orders.length) {
+    document.getElementById("orders-content").innerHTML = '<div class="empty">No orders yet.</div>';
+    return;
+  }
+  const rows = orders.slice(0, 25).map(o => {
+    const clsP = cls(o.entry);
+    return `<tr>
+      <td>${ts(o.ts)}</td>
+      <td>${o.symbol}</td>
+      <td>${o.direction}</td>
+      <td class="num">${fmt(o.lots, 2)}</td>
+      <td class="num">${fmt(o.entry, 5)}</td>
+      <td class="num">${fmt(o.sl, 5)}</td>
+      <td class="num">${fmt(o.tp, 5)}</td>
+      <td>${o.status}</td>
+    </tr>`;
+  }).join("");
+  document.getElementById("orders-content").innerHTML = `
+    <table>
+      <thead><tr>
+        <th>Time</th><th>Symbol</th><th>Side</th>
+        <th class="num">Lots</th><th class="num">Entry</th>
+        <th class="num">SL</th><th class="num">TP</th><th>Status</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function drawEquity(rows) {
+  const canvas = document.getElementById("equity-canvas");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  // Use a device-pixel-ratio aware size.
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.max(300, Math.floor(rect.width * dpr));
+  canvas.height = Math.max(200, Math.floor(rect.height * dpr));
+  ctx.scale(dpr, dpr);
+  const w = rect.width, h = rect.height;
+  ctx.clearRect(0, 0, w, h);
+
+  if (!rows || rows.length < 2) {
+    ctx.fillStyle = "#8b949e";
+    ctx.font = "12px ui-sans-serif, system-ui";
+    ctx.fillText("Not enough data yet.", 12, 24);
+    return;
+  }
+  const pad = 32;
+  const xs = rows.map(r => r.ts);
+  const ys = rows.map(r => r.equity);
+  const xmin = Math.min(...xs), xmax = Math.max(...xs);
+  const ymin = Math.min(...ys), ymax = Math.max(...ys);
+  const yrange = (ymax - ymin) || 1;
+  const xrange = (xmax - xmin) || 1;
+  const X = (x) => pad + (x - xmin) / xrange * (w - 2 * pad);
+  const Y = (y) => h - pad - (y - ymin) / yrange * (h - 2 * pad);
+
+  // Grid lines.
+  ctx.strokeStyle = "#21272e";
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = pad + i * (h - 2 * pad) / 4;
+    ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(w - pad, y); ctx.stroke();
+  }
+  // Y-axis labels.
+  ctx.fillStyle = "#8b949e";
+  ctx.font = "11px ui-sans-serif, system-ui";
+  ctx.textAlign = "right";
+  for (let i = 0; i <= 4; i++) {
+    const v = ymax - i * yrange / 4;
+    const y = pad + i * (h - 2 * pad);
+    ctx.fillText(v.toFixed(2), pad - 4, y + 3);
+  }
+
+  // Line.
+  ctx.strokeStyle = "#58a6ff";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  rows.forEach((r, i) => {
+    const x = X(r.ts), y = Y(r.equity);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Filled area.
+  ctx.lineTo(X(rows[rows.length - 1].ts), h - pad);
+  ctx.lineTo(X(rows[0].ts), h - pad);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(88, 166, 255, 0.12)";
+  ctx.fill();
+
+  // Last-value label.
+  const last = rows[rows.length - 1];
+  const lx = X(last.ts), ly = Y(last.equity);
+  ctx.fillStyle = "#e6edf3";
+  ctx.textAlign = "left";
+  ctx.fillText(last.equity.toFixed(2), lx + 6, ly - 6);
+}
+
+async function refresh() {
+  try {
+    const state = await getJSON("/api/state");
+    renderAccount(state.account, state.kill_switch, state.mt5_connected);
+    renderToday(state.today);
+
+    const [decisions, orders, equity] = await Promise.all([
+      getJSON("/api/decisions?limit=25"),
+      getJSON("/api/orders?limit=25"),
+      getJSON("/api/equity?days=7"),
+    ]);
+    renderDecisions(decisions.decisions);
+    renderOrders(orders.orders);
+    drawEquity(equity.equity);
+  } catch (e) {
+    console.error("refresh failed:", e);
+  }
+}
+
+document.getElementById("refresh").addEventListener("click", refresh);
+document.getElementById("kill").addEventListener("click", async () => {
+  if (!confirm("Engage kill switch? All new orders will be halted.")) return;
+  await postJSON("/api/kill");
+  await refresh();
+});
+document.getElementById("resume").addEventListener("click", async () => {
+  if (!confirm("Release kill switch and allow new orders?")) return;
+  await postJSON("/api/resume");
+  await refresh();
+});
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>

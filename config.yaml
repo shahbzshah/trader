@@ -1,0 +1,44 @@
+mode: demo
+
+symbols:
+  - EURUSD
+  - GBPUSD
+  - XAUUSD
+
+timeframes:
+  - M15
+  - H1
+
+schedule:
+  scan_interval_minutes: 15
+
+session_hours:
+  start: "08:00"
+  end: "20:00"
+  timezone: "UTC"
+  skip_weekends: true
+
+risk:
+  max_risk_pct_per_trade: 1.0
+  max_daily_loss_pct: 3.0
+  max_open_trades: 3
+  max_trades_per_day: 5
+  min_confidence: 0.6
+  default_playbook: breakout_retest
+
+llm:
+  base_url: "https://inference.poolside.ai/v1"
+  model: "poolside/laguna-s-2.1"
+  temperature: 0.2
+  timeout_seconds: 60
+
+dashboard:
+  host: "127.0.0.1"
+  port: 8765
+
+paths:
+  data_dir: "data"
+  logs_dir: "logs"
+  reports_dir: "reports"
+  knowledge_dir: "knowledge"
+  kill_switch_path: "data/KILL_SWITCH"

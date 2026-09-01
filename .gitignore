@@ -1,0 +1,17 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+.env
+data/KILL_SWITCH
+data/journal.db
+data/journal.db-*
+logs/*.log
+reports/*.md
+!reports/.gitkeep
+.idea/
+.vscode/
