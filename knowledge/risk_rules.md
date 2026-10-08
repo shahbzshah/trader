@@ -2,7 +2,7 @@
 
 <!--
 Filled out in milestone M3. Each rule uses a `## Rule` heading and a one-line
-machine-readable summary starting with `RULE:` that brain.py can parse.
+machine-readable summary starting with `RULE:`.
 -->
 
 RULE: max_risk_pct: 1.0
@@ -30,7 +30,7 @@ to a live account is rejected by app/mt5_client.py:ensure_demo().
 
 If `data/KILL_SWITCH` exists, no orders are sent and no scan cycles run.
 
-## Rule: No LLM overrides
+## Rule: No strategy overrides
 
-The LLM proposes; code disposes. Any decision that fails a risk check is
+The strategy proposes; code disposes. Any decision that fails a risk check is
 rejected and journaled with the rejection reasons.

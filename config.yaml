@@ -1,8 +1,6 @@
 mode: demo
 
 symbols:
-  - EURUSD
-  - GBPUSD
   - XAUUSD
 
 timeframes:
@@ -18,19 +16,27 @@ session_hours:
   timezone: "UTC"
   skip_weekends: true
 
+# Kill zones (UTC, "HH:MM-HH:MM"): entries are only taken inside these
+# windows. Empty list = no kill-zone filter (session_hours still applies).
+kill_zones:
+  - "07:00-10:00"   # London kill zone
+  - "12:00-15:00"   # New York kill zone
+
 risk:
   max_risk_pct_per_trade: 1.0
   max_daily_loss_pct: 3.0
   max_open_trades: 3
   max_trades_per_day: 5
   min_confidence: 0.6
-  default_playbook: breakout_retest
+  default_playbook: sweep_fvg_reclaim
+  breakeven_enabled: true   # move SL to entry once a position is +breakeven_at_r R
+  breakeven_at_r: 1.0
 
-llm:
-  base_url: "https://inference.poolside.ai/v1"
-  model: "poolside/laguna-s-2.1"
-  temperature: 0.2
-  timeout_seconds: 60
+news:
+  enabled: true
+  currencies: ["USD"]   # gold-only: USD events move XAUUSD; add EUR/GBP if needed
+  min_impact: "High"
+  window_minutes: 30    # no_trade within ±30 min of a high-impact USD event
 
 dashboard:
   host: "127.0.0.1"

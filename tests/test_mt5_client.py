@@ -360,3 +360,61 @@ def test_market_order_uses_symbol_filling_mode(fake_mt5, client):
     order_calls = [c for c in fake_mt5.calls if c[0] == "order_send"]
     assert order_calls, "expected an order_send call"
     assert order_calls[-1][1]["type_filling"] == ORDER_FILLING_FOK
+
+# ---------------------------------------------------------------------------
+# pending_order (limit / stop)
+# ---------------------------------------------------------------------------
+
+
+def test_pending_order_limit_request_shape(client, fake_mt5: FakeMT5):
+    res = client.pending_order(
+        "EURUSD", "buy", "limit", price=1.0990, lots=0.10,
+        sl=1.0950, tp=1.1070, comment="t", expiration=1700000000,
+    )
+    assert res.retcode == 10009
+    assert res.order_id > 0
+    sends = [c for c in fake_mt5.calls if c[0] == "order_send"]
+    assert len(sends) == 1
+    req = sends[0][1]
+    assert req["action"] == fake_mt5.TRADE_ACTION_PENDING
+    assert req["type"] == fake_mt5.ORDER_TYPE_BUY_LIMIT
+    assert req["price"] == 1.0990
+    assert req["volume"] == 0.10
+    assert req["sl"] == 1.0950
+    assert req["tp"] == 1.1070
+    assert req["expiration"] == 1700000000
+    assert "type_filling" not in req  # filling modes don't apply to pending
+
+
+def test_pending_order_sell_limit_type(client, fake_mt5: FakeMT5):
+    client.pending_order("EURUSD", "sell", "limit", 1.1010, 0.10, 1.1050, 1.0930)
+    req = [c for c in fake_mt5.calls if c[0] == "order_send"][0][1]
+    assert req["type"] == fake_mt5.ORDER_TYPE_SELL_LIMIT
+
+
+def test_pending_order_default_expiration_is_future(client, fake_mt5: FakeMT5):
+    import time
+
+    before = int(time.time())
+    client.pending_order("EURUSD", "buy", "limit", 1.0990, 0.10, 1.0950, 1.1070)
+    req = [c for c in fake_mt5.calls if c[0] == "order_send"][0][1]
+    assert req["expiration"] >= before
+
+
+def test_pending_order_invalid_type(client):
+    with pytest.raises(ValueError):
+        client.pending_order("EURUSD", "buy", "market", 1.0990, 0.10, 1.0950, 1.1070)
+
+
+def test_pending_order_rejects_non_demo(fake_mt5: FakeMT5):
+    fake_mt5.trade_mode = ACCOUNT_TRADE_MODE_REAL
+    c = MT5Client()
+    c.connect(login=1, password="pw", server="x")
+    with pytest.raises(LiveAccountError):
+        c.pending_order("EURUSD", "buy", "limit", 1.0990, 0.10, 1.0950, 1.1070)
+
+
+def test_pending_order_request_failure(client, fake_mt5: FakeMT5):
+    fake_mt5.order_fail_retcode = 10004
+    with pytest.raises(MT5RequestError):
+        client.pending_order("EURUSD", "buy", "limit", 1.0990, 0.10, 1.0950, 1.1070)

@@ -10,7 +10,7 @@ Tables (per KILO_MASTER_PROMPT.md):
     positions_history (id, ts, ticket, symbol, direction, volume,
                        price_open, price_close, sl, tp, profit, close_ts)
 
-Every LLM decision is journaled, approved or not. Equity snapshots
+Every decision is journaled, approved or not. Equity snapshots
 are recorded on every scan cycle. The connection uses WAL mode and is
 thread-safe via a per-instance lock.
 """

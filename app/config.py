@@ -19,6 +19,16 @@ class ScheduleConfig(BaseModel):
     scan_interval_minutes: int = Field(ge=1, le=1440)
 
 
+def _validate_hhmm(value: str) -> str:
+    parts = value.split(":")
+    if len(parts) != 2:
+        raise ValueError(f"must be HH:MM, got {value!r}")
+    h, m = int(parts[0]), int(parts[1])
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        raise ValueError(f"HH:MM out of range: {value!r}")
+    return f"{h:02d}:{m:02d}"
+
+
 class SessionHoursConfig(BaseModel):
     start: str
     end: str
@@ -28,13 +38,7 @@ class SessionHoursConfig(BaseModel):
     @field_validator("start", "end")
     @classmethod
     def _hhmm(cls, v: str) -> str:
-        parts = v.split(":")
-        if len(parts) != 2:
-            raise ValueError("session hours must be HH:MM")
-        h, m = int(parts[0]), int(parts[1])
-        if not (0 <= h <= 23 and 0 <= m <= 59):
-            raise ValueError("session hours out of range")
-        return f"{h:02d}:{m:02d}"
+        return _validate_hhmm(v)
 
 
 class RiskConfig(BaseModel):
@@ -43,19 +47,31 @@ class RiskConfig(BaseModel):
     max_open_trades: int = Field(default=3, ge=0)
     max_trades_per_day: int = Field(default=5, ge=0)
     min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
-    default_playbook: str = "breakout_retest"
-
-
-class LLMConfig(BaseModel):
-    base_url: str
-    model: str
-    temperature: float = Field(default=0.2, ge=0.0, le=2.0)
-    timeout_seconds: float = Field(default=60.0, gt=0.0)
+    default_playbook: str = "sweep_fvg_reclaim"
+    breakeven_enabled: bool = True
+    breakeven_at_r: float = Field(default=1.0, ge=0.1, le=10.0)
 
 
 class DashboardConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = Field(default=8765, ge=1, le=65535)
+
+
+class NewsConfig(BaseModel):
+    """Economic-calendar blackout. Fail-open: feed trouble never blocks trading."""
+
+    enabled: bool = True
+    feed_url: str = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+    cache_path: str = "data/news_cache.json"
+    cache_ttl_hours: int = Field(default=12, ge=1, le=168)
+    currencies: list[str] = Field(default_factory=lambda: ["USD"])
+    min_impact: str = "High"
+    window_minutes: int = Field(default=30, ge=0, le=240)
+
+    @field_validator("currencies")
+    @classmethod
+    def _upper_currencies(cls, v: list[str]) -> list[str]:
+        return [c.upper() for c in v]
 
 
 class PathsConfig(BaseModel):
@@ -72,11 +88,22 @@ class AppConfig(BaseModel):
     timeframes: list[str] = Field(default_factory=list)
     schedule: ScheduleConfig
     session_hours: SessionHoursConfig
+    kill_zones: list[str] = Field(default_factory=list)
     risk: RiskConfig = RiskConfig()
-    llm: LLMConfig
+    news: NewsConfig = NewsConfig()
     dashboard: DashboardConfig = DashboardConfig()
     paths: PathsConfig = PathsConfig()
-    llm_api_key: str = ""
+
+    @field_validator("kill_zones")
+    @classmethod
+    def _zone_format(cls, v: list[str]) -> list[str]:
+        out = []
+        for z in v:
+            parts = str(z).split("-")
+            if len(parts) != 2:
+                raise ValueError(f"kill zone must be 'HH:MM-HH:MM', got {z!r}")
+            out.append(f"{_validate_hhmm(parts[0])}-{_validate_hhmm(parts[1])}")
+        return out
 
     @field_validator("symbols")
     @classmethod
@@ -100,14 +127,13 @@ class EnvSecrets(BaseModel):
     mt5_password: str = ""
     mt5_server: str = ""
     mt5_path: str = ""
-    llm_api_key: str = ""
 
     @classmethod
     def from_env(cls, env_path: Path | None) -> "EnvSecrets":
         env: dict[str, str | None] = {}
         if env_path is not None and env_path.exists():
             env = {k: v for k, v in dotenv_values(env_path).items() if v is not None}
-        for k in ("MT5_LOGIN", "MT5_PASSWORD", "MT5_SERVER", "MT5_PATH", "LLM_API_KEY"):
+        for k in ("MT5_LOGIN", "MT5_PASSWORD", "MT5_SERVER", "MT5_PATH"):
             if k not in env and os.environ.get(k) is not None:
                 env[k] = os.environ.get(k)
         try:
@@ -119,7 +145,6 @@ class EnvSecrets(BaseModel):
             mt5_password=env.get("MT5_PASSWORD", "") or "",
             mt5_server=env.get("MT5_SERVER", "") or "",
             mt5_path=env.get("MT5_PATH", "") or "",
-            llm_api_key=env.get("LLM_API_KEY", "") or "",
         )
 
 
@@ -131,9 +156,9 @@ def load_config(
 ) -> AppConfig:
     """Load and validate configuration from YAML and .env.
 
-    Secrets (MT5 creds, LLM_API_KEY) are read from .env / process env and
-    injected into the returned AppConfig. The ``mode`` is asserted to be
-    ``demo`` per the safety invariant.
+    Secrets (MT5 creds) are read from .env / process env. The ``mode`` is
+    asserted to be ``demo`` per the safety invariant. Unknown config keys
+    (e.g. a legacy ``llm:`` section) are ignored.
     """
     config_path = Path(config_path)
     if base_dir is not None:
@@ -144,16 +169,12 @@ def load_config(
     with config_path.open("r", encoding="utf-8") as fh:
         raw = yaml.safe_load(fh) or {}
 
-    secrets = EnvSecrets.from_env(
-        Path(env_path) if env_path is not None else None
-    )
-
     if raw.get("mode") != "demo":
         raise ValueError(
             "config.yaml mode must be 'demo' (safety invariant: demo-only v1)"
         )
 
-    cfg = AppConfig(**raw, llm_api_key=secrets.llm_api_key)
+    cfg = AppConfig(**raw)
     return cfg
 
 
@@ -161,7 +182,7 @@ __all__ = [
     "AppConfig",
     "DashboardConfig",
     "EnvSecrets",
-    "LLMConfig",
+    "NewsConfig",
     "PathsConfig",
     "RiskConfig",
     "ScheduleConfig",

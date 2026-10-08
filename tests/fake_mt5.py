@@ -38,9 +38,14 @@ TIMEFRAME_MN1 = 49153
 
 ORDER_TYPE_BUY = 0
 ORDER_TYPE_SELL = 1
+ORDER_TYPE_BUY_LIMIT = 2
+ORDER_TYPE_SELL_LIMIT = 3
+ORDER_TYPE_BUY_STOP = 4
+ORDER_TYPE_SELL_STOP = 5
 
 TRADE_ACTION_DEAL = 1
 TRADE_ACTION_SLTP = 2
+TRADE_ACTION_PENDING = 5
 
 ORDER_TIME_GTC = 0
 ORDER_FILLING_FOK = 0
@@ -155,9 +160,14 @@ class FakeMT5:
 
     ORDER_TYPE_BUY = ORDER_TYPE_BUY
     ORDER_TYPE_SELL = ORDER_TYPE_SELL
+    ORDER_TYPE_BUY_LIMIT = ORDER_TYPE_BUY_LIMIT
+    ORDER_TYPE_SELL_LIMIT = ORDER_TYPE_SELL_LIMIT
+    ORDER_TYPE_BUY_STOP = ORDER_TYPE_BUY_STOP
+    ORDER_TYPE_SELL_STOP = ORDER_TYPE_SELL_STOP
 
     TRADE_ACTION_DEAL = TRADE_ACTION_DEAL
     TRADE_ACTION_SLTP = TRADE_ACTION_SLTP
+    TRADE_ACTION_PENDING = TRADE_ACTION_PENDING
 
     ORDER_TIME_GTC = ORDER_TIME_GTC
     ORDER_FILLING_FOK = ORDER_FILLING_FOK
@@ -187,6 +197,7 @@ class FakeMT5:
         self.symbol_data: dict[str, FakeSymbolInfo] = {}
         self.tick_data: dict[str, FakeTick] = {}
         self.rates_data: list[FakeRatesRow] = []
+        self.rates_by_tf: dict[int, list[FakeRatesRow]] = {}
         self.next_order_id = 12345
         self.initialize_fail_message = "fake init fail"
         self.login_fail_message = "fake login fail"
@@ -251,6 +262,8 @@ class FakeMT5:
 
     def copy_rates_from_pos(self, symbol: str, timeframe: int, start: int, count: int):
         self.calls.append(("copy_rates_from_pos", symbol, timeframe, start, count))
+        if timeframe in self.rates_by_tf:
+            return list(self.rates_by_tf[timeframe])
         return list(self.rates_data)
 
     def order_send(self, request: dict):

@@ -80,6 +80,7 @@ class FakeClient:
         self._positions: list[FakePos] = []
         self._next_order_id = 99999
         self._raise_on_order: Exception | None = None
+        self._last_pending: dict | None = None
         self._account = FakeAccountInfo()
 
     def ensure_demo(self):
@@ -108,6 +109,22 @@ class FakeClient:
         return FakeOrderResult(
             retcode=10009, order=self._next_order_id,
             price=1.1001, comment="ok",
+        )
+
+    def pending_order(self, symbol, direction, entry_type, price, lots, sl, tp,
+                      comment="", expiration=None):
+        if self._raise_on_order is not None:
+            raise self._raise_on_order
+        self._next_order_id += 1
+        self._last_pending = {
+            "symbol": symbol, "direction": direction,
+            "entry_type": entry_type, "price": price,
+            "lots": lots, "sl": sl, "tp": tp,
+            "comment": comment, "expiration": expiration,
+        }
+        return FakeOrderResult(
+            retcode=10009, order=self._next_order_id,
+            price=price, comment="pending-ok",
         )
 
     def close_position(self, ticket):
@@ -348,3 +365,95 @@ def test_executor_clamps_risk_pct_to_config(env):
     res = ex.execute(d)
     assert res.status == "rejected"
     assert any("risk_pct_above_max" in r for r in res.reject_reasons)
+
+# ---------------------------------------------------------------------------
+# Pending-limit path (entry_type="limit")
+# ---------------------------------------------------------------------------
+
+
+def _limit_decision(**kw):
+    base = dict(
+        action="propose", symbol="EURUSD", direction="buy",
+        entry_type="limit",
+        price=1.0990, stop_loss=1.0950, take_profit=1.1070,
+        risk_pct=0.5, confidence=0.8, playbook="sweep_fvg_reclaim",
+        reasoning="ok",
+    )
+    base.update(kw)
+    return Decision(**base)
+
+
+def test_executor_propose_limit_places_pending_order(env):
+    client, j, cfg = env
+    ex = Executor(client, j, cfg)
+    # Tick is bid=1.1000 / ask=1.1001; buy limit at 1.0990 sits below ask.
+    res = ex.execute(_limit_decision())
+    assert res.status == "pending"
+    assert res.ticket is not None
+    assert client._last_pending is not None
+    assert client._last_pending["entry_type"] == "limit"
+    assert client._last_pending["price"] == 1.0990
+    assert client._last_pending["sl"] == 1.0950
+    assert client._last_pending["tp"] == 1.1070
+    assert client._last_pending["expiration"] > 0
+    orders = j.list_orders(limit=10)
+    assert any(o["status"] == "pending" for o in orders)
+
+
+def test_executor_limit_buy_at_or_above_ask_rejected(env):
+    client, j, cfg = env
+    ex = Executor(client, j, cfg)
+    res = ex.execute(_limit_decision(price=1.1001))  # == ask
+    assert res.status == "rejected"
+    assert any("limit_price_not_below_market" in r for r in res.reject_reasons)
+
+
+def test_executor_limit_sell_at_or_below_bid_rejected(env):
+    client, j, cfg = env
+    ex = Executor(client, j, cfg)
+    res = ex.execute(_limit_decision(
+        direction="sell", price=1.1000,  # == bid
+        stop_loss=1.1040, take_profit=1.0920,
+    ))
+    assert res.status == "rejected"
+    assert any("limit_price_not_above_market" in r for r in res.reject_reasons)
+
+
+def test_executor_limit_sell_places_pending_order(env):
+    client, j, cfg = env
+    ex = Executor(client, j, cfg)
+    # Sell limit must sit above the bid (1.1000).
+    res = ex.execute(_limit_decision(
+        direction="sell", price=1.1010,
+        stop_loss=1.1050, take_profit=1.0930,
+    ))
+    assert res.status == "pending"
+    assert client._last_pending["entry_type"] == "limit"
+    assert client._last_pending["price"] == 1.1010
+
+
+def test_executor_invalid_entry_type_rejected(env):
+    client, j, cfg = env
+    ex = Executor(client, j, cfg)
+    d = Decision(
+        action="propose", symbol="EURUSD", direction="buy",
+        entry_type="stop_market", price=1.1000,
+        stop_loss=1.0950, take_profit=1.1100,
+        risk_pct=0.5, confidence=0.8, reasoning="x",
+    )
+    res = ex.execute(d)
+    assert res.status == "rejected"
+    assert any("invalid_entry_type" in r for r in res.reject_reasons)
+
+
+def test_executor_limit_requires_price(env):
+    client, j, cfg = env
+    ex = Executor(client, j, cfg)
+    res = ex.execute(_limit_decision(price=None))
+    assert res.status == "rejected"
+    # risk.py's entry check fires before the executor's own limit guard.
+    assert any(
+        s in r
+        for r in res.reject_reasons
+        for s in ("missing_entry_or_sl", "limit_requires_price")
+    )

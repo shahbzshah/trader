@@ -11,6 +11,9 @@ import pytest
 from app.scanner import (
     atr,
     build_snapshot,
+    detect_fvg,
+    detect_structure,
+    detect_sweep,
     ema,
     rsi,
     scan_watchlist,
@@ -390,3 +393,173 @@ def test_scan_watchlist_sets_spread_from_tick():
     # spread comes from the tick (bid=1.0, ask=1.0001 -> 0.0001)
     assert snaps[0]["spread"] is not None
     assert snaps[0]["spread"] == pytest.approx(0.0001, abs=1e-9)
+
+# ---------------------------------------------------------------------------
+# SMC detectors: detect_fvg / detect_sweep / detect_structure
+# ---------------------------------------------------------------------------
+
+
+def _smc_df(rows, t0=1704067200, step=900):
+    return pd.DataFrame([
+        {"time": t0 + i * step, "open": o, "high": h, "low": l, "close": c,
+         "tick_volume": 10, "spread": 10, "real_volume": 0}
+        for i, (o, h, l, c) in enumerate(rows)
+    ])
+
+
+def test_detect_fvg_bullish_gap():
+    rows = [(1.1000, 1.1010, 1.0990, 1.1005)] * 15
+    rows += [
+        (1.1005, 1.1012, 1.0995, 1.1000),   # idx 15
+        (1.1000, 1.1008, 1.0992, 1.0998),   # idx 16
+        (1.0998, 1.1020, 1.1015, 1.1018),   # idx 17: low 1.1015 > high[15] 1.1012
+        (1.1018, 1.1025, 1.1016, 1.1022),   # idx 18
+    ]
+    fvgs = detect_fvg(_smc_df(rows), min_size_atr=0.0)
+    bull = [f for f in fvgs if f["type"] == "bullish" and f["formed_index"] == 17]
+    assert len(bull) == 1
+    f = bull[0]
+    assert f["bottom"] == pytest.approx(1.1012)
+    assert f["top"] == pytest.approx(1.1015)
+    assert f["midpoint"] == pytest.approx((1.1012 + 1.1015) / 2)
+    assert f["filled"] is False
+
+
+def test_detect_fvg_bearish_gap():
+    rows = [(1.1000, 1.1010, 1.0990, 1.1005)] * 15
+    rows += [
+        (1.1005, 1.1012, 1.0995, 1.1000),   # idx 15
+        (1.1000, 1.1008, 1.0992, 1.0998),   # idx 16
+        (1.0998, 1.0990, 1.0975, 1.0980),   # idx 17: high 1.0990 < low[15] 1.0995
+    ]
+    fvgs = detect_fvg(_smc_df(rows), min_size_atr=0.0)
+    bear = [f for f in fvgs if f["type"] == "bearish" and f["formed_index"] == 17]
+    assert len(bear) == 1
+    assert bear[0]["top"] == pytest.approx(1.0995)
+    assert bear[0]["bottom"] == pytest.approx(1.0990)
+
+
+def test_detect_fvg_marks_filled_gaps():
+    rows = [(1.1000, 1.1010, 1.0990, 1.1005)] * 15
+    rows += [
+        (1.1005, 1.1012, 1.0995, 1.1000),   # idx 15
+        (1.1000, 1.1008, 1.0992, 1.0998),   # idx 16
+        (1.0998, 1.1020, 1.1015, 1.1018),   # idx 17: bullish FVG
+        (1.1018, 1.1022, 1.1005, 1.1008),   # idx 18: low 1.1005 <= 1.1012 -> filled
+    ]
+    fvgs = detect_fvg(_smc_df(rows), min_size_atr=0.0)
+    f = next(x for x in fvgs if x["formed_index"] == 17)
+    assert f["filled"] is True
+
+
+def test_detect_fvg_filters_tiny_gaps_by_atr():
+    rows = [(1.1000, 1.1010, 1.0990, 1.1005)] * 10
+    rows += [
+        (1.1005, 1.1012, 1.0995, 1.1000),
+        (1.1000, 1.1008, 1.0992, 1.0998),
+        (1.0998, 1.1020, 1.10121, 1.1018),  # gap of 0.00001
+    ]
+    fvgs = detect_fvg(_smc_df(rows), min_size_atr=0.25)
+    assert not [f for f in fvgs if f["formed_index"] == 22]
+
+
+def test_detect_fvg_needs_three_bars():
+    assert detect_fvg(_smc_df([(1.0, 1.1, 0.9, 1.0)] * 2)) == []
+
+
+def test_detect_sweep_low_wick_close_back_inside():
+    rows = [(1.1020, 1.1025, 1.1015, 1.1020)] * 10
+    rows.append((1.1020, 1.1022, 1.1005, 1.1018))  # wick below, close above
+    sweeps = detect_sweep(_smc_df(rows), swing_high=1.1025, swing_low=1.1015,
+                          lookback=3)
+    assert len(sweeps) == 1
+    s = sweeps[0]
+    assert s["side"] == "low"
+    assert s["level"] == pytest.approx(1.1015)
+    assert s["bar_index"] == 10
+    assert s["extreme"] == pytest.approx(1.1005)
+
+
+def test_detect_sweep_high_mirror():
+    rows = [(1.1020, 1.1025, 1.1015, 1.1020)] * 10
+    rows.append((1.1020, 1.1035, 1.1018, 1.1022))  # wick above, close below
+    sweeps = detect_sweep(_smc_df(rows), swing_high=1.1025, swing_low=1.1015,
+                          lookback=3)
+    assert len(sweeps) == 1
+    assert sweeps[0]["side"] == "high"
+    assert sweeps[0]["extreme"] == pytest.approx(1.1035)
+
+
+def test_detect_sweep_requires_close_back_inside():
+    rows = [(1.1020, 1.1025, 1.1015, 1.1020)] * 10
+    rows.append((1.1020, 1.1022, 1.1005, 1.1008))  # closes below the level
+    sweeps = detect_sweep(_smc_df(rows), swing_high=None, swing_low=1.1015,
+                          lookback=3)
+    assert sweeps == []
+
+
+def test_detect_sweep_only_recent_bars():
+    rows = [(1.1020, 1.1025, 1.1015, 1.1020)] * 10
+    rows[2] = (1.1020, 1.1022, 1.1005, 1.1018)  # old sweep at idx 2
+    sweeps = detect_sweep(_smc_df(rows), swing_high=None, swing_low=1.1015,
+                          lookback=3)
+    assert sweeps == []
+
+
+def _pivot_df(pivots, bars_per_leg=8, wiggle=0.0002):
+    # The wiggle breaks exact price ties between consecutive bars; fractal
+    # swing detection needs strict local extrema, as in real market data.
+    rows = []
+    px = pivots[0]
+    for leg in range(len(pivots) - 1):
+        for b in range(bars_per_leg):
+            c = pivots[leg] + (pivots[leg + 1] - pivots[leg]) * b / bars_per_leg
+            w = wiggle * ((b % 3) - 1)
+            o = px + w * 0.5
+            rows.append((o, max(o, c) + abs(w) + 0.0001,
+                         min(o, c) - abs(w) - 0.0001, c))
+            px = c
+    rows.append((px, pivots[-1] + 0.0002, pivots[-1] - 0.0002, pivots[-1]))
+    return _smc_df(rows, step=3600)
+
+
+def test_detect_structure_uptrend():
+    df = _pivot_df([1.0900, 1.0960, 1.0930, 1.0990, 1.0960, 1.1020])
+    st = detect_structure(df)
+    assert st["trend"] == "up"
+    assert len(st["swings"]) >= 4
+
+
+def test_detect_structure_downtrend():
+    df = _pivot_df([1.1020, 1.0960, 1.0990, 1.0930, 1.0960, 1.0900])
+    st = detect_structure(df)
+    assert st["trend"] == "down"
+
+
+def test_detect_structure_range():
+    df = _smc_df([(1.1000, 1.1005, 1.0995, 1.1000)] * 70, step=3600)
+    st = detect_structure(df)
+    assert st["trend"] == "range"
+    assert st["last_break"] is None
+
+
+def test_detect_structure_reports_bos():
+    # Clean run of higher highs: the last leg breaks the prior swing high.
+    df = _pivot_df([1.0900, 1.0960, 1.0930, 1.0990, 1.0960, 1.1040])
+    st = detect_structure(df)
+    assert st["last_break"] is not None
+    assert st["last_break"]["type"] == "BOS"
+    assert st["last_break"]["direction"] == "bullish"
+
+
+def test_snapshot_includes_smc_block():
+    fx = make_constant_fixture(n=60)
+    rates = fixture_to_rates_dict(fx)
+    snap = build_snapshot("EURUSD", {"M15": rates}, FakeAccount(), [])
+    smc = snap["timeframes"]["M15"]["smc"]
+    assert set(smc) >= {"fvgs", "sweeps", "structure", "swing_high_ref",
+                        "swing_low_ref"}
+    assert smc["structure"]["trend"] in ("up", "down", "range")
+    # A constant series has no gaps and no sweeps.
+    assert smc["fvgs"] == []
+    assert smc["sweeps"] == []

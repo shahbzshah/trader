@@ -1,17 +1,14 @@
-"""End-to-end test of `python -m app.main analyze --dry` with a mocked LLM.
+"""End-to-end test of `python -m app.main analyze --dry`.
 
-Exercises M3 acceptance criterion: the analyze path must run end-to-end
-with a mocked LLM and print a Decision without touching orders.
+Exercises the analyze path end-to-end: it must run with the deterministic
+rules engine and print a Decision without touching orders.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
-
-import httpx
 
 
 def test_main_analyze_dry_prints_decision(capsys, monkeypatch, tmp_path):
@@ -45,21 +42,6 @@ def test_main_analyze_dry_prints_decision(capsys, monkeypatch, tmp_path):
             return None
 
     monkeypatch.setattr(main_module, "MT5Client", _NoopClient)
-
-    # Intercept the LLMClient constructor so it uses a MockTransport.
-    from app.brain import LLMClient as RealLLMClient
-    from tests.fake_http import make_chat_response, recording_transport
-
-    valid = {"action": "no_trade", "symbol": "EURUSD", "confidence": 0.7,
-             "reasoning": "no clear setup"}
-    transport, _ = recording_transport([make_chat_response(json.dumps(valid))])
-
-    class MockedLLMClient(RealLLMClient):
-        def __init__(self, *args, **kwargs):
-            kwargs["transport"] = transport
-            super().__init__(*args, **kwargs)
-
-    monkeypatch.setattr(main_module, "LLMClient", MockedLLMClient)
 
     # Make load_config deterministic and fast.
     monkeypatch.setattr(main_module, "load_config", lambda *a, **k: cfg)

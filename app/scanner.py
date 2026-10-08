@@ -1,8 +1,11 @@
-"""Scanner: convert raw OHLC rates into LLM-ready snapshot dicts.
+"""Scanner: convert raw OHLC rates into rules-engine-ready snapshot dicts.
 
 Public surface:
     build_snapshot(symbol, rates_by_tf, account, positions) -> dict
     scan_watchlist(client, config) -> list[dict]
+    detect_fvg(df, ...) -> list[dict]
+    detect_sweep(df, swing_high, swing_low, ...) -> list[dict]
+    detect_structure(df, ...) -> dict
 
 Snapshot per symbol:
 - last close per timeframe
@@ -11,6 +14,8 @@ Snapshot per symbol:
 - session high/low (current session = today's calendar day UTC by default)
 - current spread
 - recent swing high/low (last 20 bars on the primary timeframe)
+- per-timeframe ``smc`` block: fair value gaps, liquidity sweeps,
+  market-structure (BOS/CHoCH) trend and swing reference levels
 - last 50 closed candles per timeframe (OHLC rounded)
 - open positions for that symbol
 
@@ -160,18 +165,238 @@ def _session_bounds(times: pd.Series, session_start_hour_utc: int = 0) -> tuple[
 
 
 def _swing_highs_lows(close: pd.Series, high: pd.Series, low: pd.Series,
-                       lookback: int = 20) -> tuple[float | None, float | None]:
+                       lookback: int = 20, exclude_last: int = 0) -> tuple[float | None, float | None]:
     """Return (swing_high, swing_low) over the last ``lookback`` bars.
 
     "Swing" = the max(high) / min(low) over that window. Last-bar-anchored
-    so the LLM gets a recent reference, not the all-time extreme.
+    so the caller gets a recent reference, not the all-time extreme.
+    ``exclude_last`` drops that many of the most recent bars first, which
+    is what sweep detection needs: the reference level must pre-date the
+    bars being tested for a sweep.
     """
     if len(close) == 0:
         return None, None
+    if exclude_last:
+        if exclude_last >= len(high):
+            return None, None
+        high = high.iloc[:-exclude_last]
+        low = low.iloc[:-exclude_last]
     window = min(lookback, len(high))
     tail_h = high.tail(window)
     tail_l = low.tail(window)
     return _round(float(tail_h.max())), _round(float(tail_l.min()))
+
+
+# ---------------------------------------------------------------------------
+# Smart Money Concepts detectors (pure, unit-testable)
+# ---------------------------------------------------------------------------
+#
+# Conventions used throughout:
+#   - ``bar_index`` / ``formed_index`` are POSITIONAL indices into the
+#     DataFrame that was passed in (0 == first row). Callers comparing
+#     indices must use values from the same frame.
+#   - A bullish FVG at bar i means low[i] > high[i-2] (displacement up,
+#     leaving an unfilled gap between candle i-2's high and candle i's low).
+
+
+def detect_fvg(df: pd.DataFrame, min_size_atr: float = 0.25,
+               max_age_bars: int = 40) -> list[dict]:
+    """Detect fair value gaps (3-candle displacement gaps).
+
+    Returns a list of dicts, oldest first, each with:
+        type: "bullish" | "bearish"
+        top / bottom / midpoint: gap boundaries (float)
+        formed_index: positional index of the displacing (3rd) candle
+        filled: True when a later bar traded fully through the gap
+        size_atr: gap height expressed in ATR14 units
+
+    Only gaps formed within ``max_age_bars`` of the last bar and at least
+    ``min_size_atr`` x ATR14 tall are returned, so the snapshot stays lean.
+    """
+    n = len(df)
+    if n < 3:
+        return []
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    atr_s = atr(high, low, df["close"].astype(float), 14)
+
+    # Vectorised gap detection: bullish gap at i <-> low[i] > high[i-2].
+    prev2_high = high.shift(2)
+    prev2_low = low.shift(2)
+    bull_mask = low > prev2_high
+    bear_mask = high < prev2_low
+
+    out: list[dict] = []
+    for i in range(2, n):
+        a = float(atr_s.iloc[i])
+        if not (a > 0):
+            continue
+        if bool(bull_mask.iloc[i]):
+            top = float(low.iloc[i])
+            bottom = float(prev2_high.iloc[i])
+            size = top - bottom
+            if size < min_size_atr * a:
+                continue
+            filled = bool((low.iloc[i + 1:] <= bottom).any()) if i + 1 < n else False
+            out.append({
+                "type": "bullish",
+                "top": _round(top),
+                "bottom": _round(bottom),
+                "midpoint": _round((top + bottom) / 2.0),
+                "formed_index": i,
+                "filled": filled,
+                "size_atr": _round(size / a, 3),
+            })
+        elif bool(bear_mask.iloc[i]):
+            top = float(prev2_low.iloc[i])
+            bottom = float(high.iloc[i])
+            size = top - bottom
+            if size < min_size_atr * a:
+                continue
+            filled = bool((high.iloc[i + 1:] >= top).any()) if i + 1 < n else False
+            out.append({
+                "type": "bearish",
+                "top": _round(top),
+                "bottom": _round(bottom),
+                "midpoint": _round((top + bottom) / 2.0),
+                "formed_index": i,
+                "filled": filled,
+                "size_atr": _round(size / a, 3),
+            })
+
+    cutoff = (n - 1) - max_age_bars
+    return [f for f in out if f["formed_index"] >= cutoff]
+
+
+def detect_sweep(df: pd.DataFrame, swing_high: float | None,
+                 swing_low: float | None, lookback: int = 5) -> list[dict]:
+    """Detect liquidity sweeps within the last ``lookback`` bars.
+
+    A sweep of the swing HIGH: a bar whose wick traded above the level but
+    whose close finished back below it (stop-hunt of buy-side liquidity).
+    Mirror logic applies to the swing LOW.
+
+    Returns a list of dicts, oldest first:
+        side: "high" | "low"   (which level was swept)
+        level: the swept reference level
+        bar_index: positional index of the sweeping bar
+        extreme: the wick extreme beyond the level
+    """
+    n = len(df)
+    if n == 0 or (swing_high is None and swing_low is None):
+        return []
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    close = df["close"].astype(float)
+
+    out: list[dict] = []
+    for i in range(max(0, n - lookback), n):
+        h, l, c = float(high.iloc[i]), float(low.iloc[i]), float(close.iloc[i])
+        if swing_high is not None and h > swing_high and c < swing_high:
+            out.append({
+                "side": "high",
+                "level": _round(swing_high),
+                "bar_index": i,
+                "extreme": _round(h),
+            })
+        if swing_low is not None and l < swing_low and c > swing_low:
+            out.append({
+                "side": "low",
+                "level": _round(swing_low),
+                "bar_index": i,
+                "extreme": _round(l),
+            })
+    return out
+
+
+def _fractal_swings(df: pd.DataFrame, left: int = 2, right: int = 2,
+                    lookback: int = 60) -> list[dict]:
+    """Fractal swing points: bar i is a swing high when high[i] is the max
+    of high[i-left .. i+right] (mirror for lows). Returns dicts sorted by
+    positional index: {type: "high"|"low", price, index}."""
+    n = len(df)
+    if n < left + right + 1:
+        return []
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    start = max(0, n - lookback)
+    swings: list[dict] = []
+    for i in range(max(start, left), n - right):
+        h, l = float(high.iloc[i]), float(low.iloc[i])
+        window_h = high.iloc[i - left:i + right + 1]
+        window_l = low.iloc[i - left:i + right + 1]
+        if h >= float(window_h.max()) and (window_h == h).sum() == 1:
+            swings.append({"type": "high", "price": _round(h), "index": i})
+        if l <= float(window_l.min()) and (window_l == l).sum() == 1:
+            swings.append({"type": "low", "price": _round(l), "index": i})
+    swings.sort(key=lambda s: s["index"])
+    return swings
+
+
+def detect_structure(df: pd.DataFrame, left: int = 2, right: int = 2,
+                     lookback: int = 60) -> dict:
+    """Market structure: trend + most recent BOS/CHoCH.
+
+    Trend comes from the swing sequence (higher highs + higher lows = up,
+    lower highs + lower lows = down, otherwise range), then refined by
+    walking closes through the confirmed swings: a close beyond the last
+    swing extreme in the trend's direction is a BOS (break of structure);
+    against it, a CHoCH (change of character), which flips the trend.
+
+    Returns:
+        trend: "up" | "down" | "range"
+        swings: the fractal swing list used
+        last_break: {type: "BOS"|"CHoCH", direction: "bullish"|"bearish",
+                     index, price} | None
+    """
+    n = len(df)
+    empty = {"trend": "range", "swings": [], "last_break": None}
+    if n < left + right + 3:
+        return empty
+    close = df["close"].astype(float)
+    swings = _fractal_swings(df, left, right, lookback)
+    highs = [s for s in swings if s["type"] == "high"]
+    lows = [s for s in swings if s["type"] == "low"]
+
+    def _seq_trend() -> str:
+        if len(highs) >= 2 and len(lows) >= 2:
+            hh = highs[-1]["price"] > highs[-2]["price"]
+            hl = lows[-1]["price"] > lows[-2]["price"]
+            lh = highs[-1]["price"] < highs[-2]["price"]
+            ll = lows[-1]["price"] < lows[-2]["price"]
+            if hh and hl:
+                return "up"
+            if lh and ll:
+                return "down"
+        return "range"
+
+    trend = _seq_trend()
+    last_break: dict | None = None
+    start = max(1, n - lookback)
+    for i in range(start, n):
+        ref_h = next((s for s in reversed(highs) if s["index"] < i), None)
+        ref_l = next((s for s in reversed(lows) if s["index"] < i), None)
+        c_now, c_prev = float(close.iloc[i]), float(close.iloc[i - 1])
+        direction = None
+        if ref_h is not None and c_now > ref_h["price"] >= c_prev:
+            direction = "bullish"
+        elif ref_l is not None and c_now < ref_l["price"] <= c_prev:
+            direction = "bearish"
+        if direction is None:
+            continue
+        if trend == "range":
+            kind = "BOS"  # break out of range establishes the new trend
+        else:
+            with_trend = (direction == "bullish") == (trend == "up")
+            kind = "BOS" if with_trend else "CHoCH"
+        last_break = {
+            "type": kind,
+            "direction": direction,
+            "index": i,
+            "price": _round(c_now),
+        }
+        trend = "up" if direction == "bullish" else "down"
+    return {"trend": trend, "swings": swings, "last_break": last_break}
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +441,18 @@ def _summarize_timeframe(df: pd.DataFrame) -> dict:
         }
         for _, r in tail.iterrows()
     ]
+
+    # Smart Money Concepts block: FVGs, liquidity sweeps and structure.
+    # Indices are positional within the full frame passed in.
+    ref_high, ref_low = _swing_highs_lows(close, high, low,
+                                          lookback=20, exclude_last=5)
+    block["smc"] = {
+        "fvgs": detect_fvg(df),
+        "sweeps": detect_sweep(df, ref_high, ref_low, lookback=5),
+        "structure": detect_structure(df),
+        "swing_high_ref": ref_high,
+        "swing_low_ref": ref_low,
+    }
     return block
 
 
@@ -241,8 +478,8 @@ def build_snapshot(
         positions: any iterable of ``Position``-like objects for this symbol.
 
     Returns:
-        A plain dict ready to be JSON-encoded for the LLM. Floating-point
-        values are rounded to 5 decimal places so the output is stable.
+        A plain dict for the rules engine. Floating-point values are
+        rounded to 5 decimal places so the output is stable.
     """
     symbol = symbol.upper()
     snap: dict[str, Any] = {
@@ -367,6 +604,9 @@ def scan_watchlist(client: Any, config: Any) -> list[dict]:
 __all__ = [
     "atr",
     "build_snapshot",
+    "detect_fvg",
+    "detect_structure",
+    "detect_sweep",
     "ema",
     "rsi",
     "scan_watchlist",

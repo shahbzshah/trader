@@ -5,6 +5,13 @@ The executor takes an approved Decision, re-validates against
 since the brain decided), sizes the position, places the order via
 ``app.mt5_client``, and records the order row linked to the decision id.
 
+``entry_type="market"`` decisions fill immediately (status "filled");
+``entry_type="limit"`` decisions are placed as broker pending orders that
+rest until price touches them (status "pending", expiring after
+``PENDING_EXPIRY_SECS``). Limit placement is validated against the
+current tick so mispriced pendings are rejected before they reach the
+broker.
+
 It also handles close/modify actions for open positions and reports
 clear status strings for partial failures.
 """
@@ -12,6 +19,7 @@ clear status strings for partial failures.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
@@ -22,10 +30,14 @@ from app.risk import AccountState, RiskVerdict, check_decision, position_size
 
 logger = logging.getLogger(__name__)
 
+# Pending limit orders expire after the same window the backtest allows an
+# unfilled order to rest (MAX_PENDING_BARS=5 bars on M15 == 75 minutes).
+PENDING_EXPIRY_SECS = 5 * 15 * 60
+
 
 @dataclass
 class ExecutionResult:
-    status: str            # "filled" | "rejected" | "closed" | "modified" | "skipped"
+    status: str            # "filled" | "pending" | "rejected" | "closed" | "modified" | "skipped"
     decision_id: int | None
     order_id: int | None
     ticket: int | None
@@ -73,7 +85,7 @@ class Executor:
         rows: list[Mapping] = []
         for o in orders:
             rows.append({
-                "kind": "order_placed" if o["status"] in ("filled", "submitted")
+                "kind": "order_placed" if o["status"] in ("filled", "submitted", "pending")
                         else "order_rejected",
                 "ts": o["ts"],
                 "profit": 0.0,
@@ -175,9 +187,36 @@ class Executor:
             return self._reject_with_reason(decision, raw_llm_json,
                                              ["risk_pct_non_positive"])
 
+        entry_type = str(getattr(decision, "entry_type", "market")
+                         or "market").lower()
+        if entry_type not in ("market", "limit"):
+            return self._reject_with_reason(decision, raw_llm_json,
+                                             [f"invalid_entry_type:{decision.entry_type}"])
+
         # Use proposed entry if given, else fetch a tick price.
         entry = decision.price
-        if entry is None:
+        if entry_type == "limit":
+            # Limit orders are sent to the broker as pending orders and rest
+            # until price touches them. Validate placement against the current
+            # market: a buy limit must sit below the ask (sell limit above
+            # the bid), otherwise MT5 rejects it with an invalid price.
+            if entry is None:
+                return self._reject_with_reason(decision, raw_llm_json,
+                                                 ["limit_requires_price"])
+            try:
+                tick = self.client.symbol_tick(decision.symbol)
+            except Exception as exc:  # noqa: BLE001
+                return self._reject_with_reason(decision, raw_llm_json,
+                                                 [f"tick_fetch_failed:{exc}"])
+            if decision.direction == "buy" and not float(entry) < float(tick.ask):
+                return self._reject_with_reason(
+                    decision, raw_llm_json,
+                    [f"limit_price_not_below_market:entry={entry}>=ask={tick.ask}"])
+            if decision.direction == "sell" and not float(entry) > float(tick.bid):
+                return self._reject_with_reason(
+                    decision, raw_llm_json,
+                    [f"limit_price_not_above_market:entry={entry}<=bid={tick.bid}"])
+        elif entry is None:
             try:
                 tick = self.client.symbol_tick(decision.symbol)
                 entry = tick.ask if decision.direction == "buy" else tick.bid
@@ -213,15 +252,29 @@ class Executor:
             sl=float(decision.stop_loss),
             tp=(None if decision.take_profit is None else float(decision.take_profit)),
         )
+        comment = f"agent:{decision.playbook}"[:32]
         try:
-            res = self.client.market_order(
-                decision.symbol,
-                decision.direction,
-                lots,
-                float(decision.stop_loss),
-                float(decision.take_profit) if decision.take_profit is not None else 0.0,
-                comment=f"agent:{decision.playbook}"[:32],
-            )
+            if entry_type == "limit":
+                res = self.client.pending_order(
+                    decision.symbol,
+                    decision.direction,
+                    entry_type,
+                    float(entry),
+                    lots,
+                    float(decision.stop_loss),
+                    float(decision.take_profit) if decision.take_profit is not None else 0.0,
+                    comment=comment,
+                    expiration=int(time.time()) + PENDING_EXPIRY_SECS,
+                )
+            else:
+                res = self.client.market_order(
+                    decision.symbol,
+                    decision.direction,
+                    lots,
+                    float(decision.stop_loss),
+                    float(decision.take_profit) if decision.take_profit is not None else 0.0,
+                    comment=comment,
+                )
         except Exception as exc:  # noqa: BLE001
             self.journal.update_order_status(order_id, status="rejected",
                                               error=str(exc))
@@ -235,14 +288,19 @@ class Executor:
             )
 
         ticket = int(getattr(res, "order_id", None) or getattr(res, "order", 0) or 0)
-        self.journal.update_order_status(order_id, status="filled",
+        final_status = "pending" if entry_type == "limit" else "filled"
+        self.journal.update_order_status(order_id, status=final_status,
                                           ticket=ticket)
+        if entry_type == "limit":
+            message = f"pending limit {lots} lots at {entry}"
+        else:
+            message = f"filled {lots} lots at {getattr(res, 'price', 0.0)}"
         return ExecutionResult(
-            status="filled",
+            status=final_status,
             decision_id=decision_id,
             order_id=order_id,
             ticket=ticket,
-            message=f"filled {lots} lots at {getattr(res, 'price', 0.0)}",
+            message=message,
             reject_reasons=[],
         )
 

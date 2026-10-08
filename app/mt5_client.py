@@ -199,6 +199,13 @@ _ORDER_TYPE_MAP: dict[str, str] = {
     "sell": "ORDER_TYPE_SELL",
 }
 
+_PENDING_TYPE_MAP: dict[tuple[str, str], str] = {
+    ("buy", "limit"): "ORDER_TYPE_BUY_LIMIT",
+    ("sell", "limit"): "ORDER_TYPE_SELL_LIMIT",
+    ("buy", "stop"): "ORDER_TYPE_BUY_STOP",
+    ("sell", "stop"): "ORDER_TYPE_SELL_STOP",
+}
+
 _FILLING_MAP: dict[str, int] = {
     "FOK": 0,
     "IOC": 1,
@@ -469,6 +476,65 @@ class MT5Client:
         if retcode != int(mt5.TRADE_RETCODE_DONE):
             raise MT5RequestError(
                 f"order rejected retcode={retcode} comment={result.comment!r}"
+            )
+        return OrderResult(
+            retcode=retcode,
+            order_id=int(result.order),
+            price=float(result.price),
+            comment=str(result.comment),
+        )
+
+    def pending_order(
+        self,
+        symbol: str,
+        direction: str,
+        entry_type: str,
+        price: float,
+        lots: float,
+        sl: float,
+        tp: float,
+        comment: str = "",
+        expiration: int | None = None,
+    ) -> OrderResult:
+        """Place a pending order (limit/stop) that rests until filled.
+
+        ``expiration`` is a unix timestamp after which the broker cancels
+        the unfilled order; defaults to 24h from now.
+        """
+        self._require_connected()
+        # Re-check demo at order time (safety invariant).
+        self.ensure_demo()
+        mt5 = _get_mt5()
+        type_attr = _PENDING_TYPE_MAP.get(
+            (direction.lower(), entry_type.lower())
+        )
+        if type_attr is None:
+            raise ValueError(
+                "pending order needs direction 'buy'/'sell' and entry_type "
+                f"'limit'/'stop', got {direction!r}/{entry_type!r}"
+            )
+        order_type = getattr(mt5, type_attr)
+        exp = int(expiration) if expiration else int(time.time()) + 24 * 3600
+        request: dict[str, Any] = {
+            "action": mt5.TRADE_ACTION_PENDING,
+            "symbol": symbol,
+            "volume": float(lots),
+            "type": order_type,
+            "price": float(price),
+            "sl": float(sl),
+            "tp": float(tp),
+            "magic": 99001,
+            "comment": comment,
+            "type_time": mt5.ORDER_TIME_GTC,
+            "expiration": exp,
+        }
+        result = mt5.order_send(request)
+        if result is None:
+            raise MT5RequestError(f"order_send returned None: {mt5.last_error()}")
+        retcode = int(result.retcode)
+        if retcode != int(mt5.TRADE_RETCODE_DONE):
+            raise MT5RequestError(
+                f"pending order rejected retcode={retcode} comment={result.comment!r}"
             )
         return OrderResult(
             retcode=retcode,

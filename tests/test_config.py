@@ -19,7 +19,7 @@ def test_load_config_from_real_yaml(config_yaml_path, env_path):
     cfg = load_config(config_yaml_path, env_path)
     assert isinstance(cfg, AppConfig)
     assert cfg.mode == "demo"
-    assert cfg.symbols == ["EURUSD", "GBPUSD", "XAUUSD"]
+    assert cfg.symbols == ["XAUUSD"]
     assert cfg.timeframes == ["M15", "H1"]
     assert cfg.schedule.scan_interval_minutes == 15
     assert cfg.session_hours.start == "08:00"
@@ -28,11 +28,9 @@ def test_load_config_from_real_yaml(config_yaml_path, env_path):
     assert cfg.risk.max_daily_loss_pct == 3.0
     assert cfg.risk.max_open_trades == 3
     assert cfg.risk.max_trades_per_day == 5
-    assert cfg.llm.model == "poolside/laguna-s-2.1"
-    assert cfg.llm.base_url == "https://inference.poolside.ai/v1"
     assert cfg.dashboard.port == 8765
-    assert cfg.llm_api_key == "sk-test-xyz"
-
+    assert not hasattr(cfg, "llm")
+    
 
 def test_load_config_rejects_non_demo(tmp_path, env_path):
     bad = tmp_path / "config.yaml"
@@ -41,8 +39,7 @@ def test_load_config_rejects_non_demo(tmp_path, env_path):
         "symbols: [EURUSD]\n"
         "timeframes: [M15]\n"
         "schedule: {scan_interval_minutes: 15}\n"
-        "session_hours: {start: '08:00', end: '20:00'}\n"
-        "llm: {base_url: 'http://x', model: 'm'}\n",
+        "session_hours: {start: '08:00', end: '20:00'}\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="must be 'demo'"):
@@ -61,8 +58,7 @@ def test_load_config_empty_symbols(tmp_path, env_path):
         "symbols: []\n"
         "timeframes: [M15]\n"
         "schedule: {scan_interval_minutes: 15}\n"
-        "session_hours: {start: '08:00', end: '20:00'}\n"
-        "llm: {base_url: 'http://x', model: 'm'}\n",
+        "session_hours: {start: '08:00', end: '20:00'}\n",
         encoding="utf-8",
     )
     with pytest.raises(Exception) as exc:
@@ -83,8 +79,7 @@ def test_env_secrets_parsing(tmp_path):
     assert s.mt5_login == 42
     assert s.mt5_password == "pw"
     assert s.mt5_server == "S"
-    assert s.llm_api_key == "k"
-
+    
 
 def test_env_secrets_missing_file_ok(tmp_path):
     s = EnvSecrets.from_env(tmp_path / "missing.env")
@@ -108,7 +103,46 @@ def test_risk_defaults():
     assert r.max_open_trades == 3
     assert r.max_trades_per_day == 5
     assert r.min_confidence == 0.6
-    assert r.default_playbook == "breakout_retest"
+    assert r.default_playbook == "sweep_fvg_reclaim"
+    assert r.breakeven_enabled is True
+    assert r.breakeven_at_r == 1.0
+
+
+def test_kill_zones_normalized_and_validated():
+    cfg = AppConfig(
+        schedule={"scan_interval_minutes": 15},
+        session_hours={"start": "08:00", "end": "20:00"},
+        symbols=["XAUUSD"],
+        timeframes=["M15"],
+        kill_zones=["7:5-10:00", "12:00-15:00"],
+    )
+    assert cfg.kill_zones == ["07:05-10:00", "12:00-15:00"]
+    with pytest.raises(Exception):
+        AppConfig(
+            schedule={"scan_interval_minutes": 15},
+            session_hours={"start": "08:00", "end": "20:00"},
+            symbols=["XAUUSD"],
+            timeframes=["M15"],
+            kill_zones=["not-a-zone"],
+        )
+    with pytest.raises(Exception):
+        AppConfig(
+            schedule={"scan_interval_minutes": 15},
+            session_hours={"start": "08:00", "end": "20:00"},
+            symbols=["XAUUSD"],
+            timeframes=["M15"],
+            kill_zones=["25:00-26:00"],
+        )
+
+
+def test_kill_zones_default_empty():
+    cfg = AppConfig(
+        schedule={"scan_interval_minutes": 15},
+        session_hours={"start": "08:00", "end": "20:00"},
+        symbols=["XAUUSD"],
+        timeframes=["M15"],
+    )
+    assert cfg.kill_zones == []
 
 
 def test_load_config_uses_overrides(tmp_path, env_path):
@@ -122,8 +156,6 @@ def test_load_config_uses_overrides(tmp_path, env_path):
         "risk: {max_risk_pct_per_trade: 0.5, max_daily_loss_pct: 2.0, "
         "max_open_trades: 1, max_trades_per_day: 2, min_confidence: 0.7, "
         "default_playbook: trend_pullback}\n"
-        "llm: {base_url: 'http://localhost:11434/v1', model: 'llama3', "
-        "temperature: 0.0, timeout_seconds: 30}\n"
         "dashboard: {host: '0.0.0.0', port: 9000}\n",
         encoding="utf-8",
     )
@@ -134,3 +166,18 @@ def test_load_config_uses_overrides(tmp_path, env_path):
     assert cfg.risk.min_confidence == 0.7
     assert cfg.risk.default_playbook == "trend_pullback"
     assert cfg.dashboard.port == 9000
+
+def test_load_config_ignores_legacy_llm_section(tmp_path, env_path):
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        "mode: demo\n"
+        "symbols: [EURUSD]\n"
+        "timeframes: [M15]\n"
+        "schedule: {scan_interval_minutes: 15}\n"
+        "session_hours: {start: '08:00', end: '20:00'}\n"
+        "llm: {base_url: 'http://x', model: 'm'}\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(cfg_path, env_path)
+    assert cfg.symbols == ["EURUSD"]
+    assert not hasattr(cfg, "llm")

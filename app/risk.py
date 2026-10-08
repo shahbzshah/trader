@@ -2,7 +2,7 @@
 
 No I/O. All inputs passed in. 100% unit-testable.
 
-This module is the ONLY authority on position sizing and limits. The LLM
+This module is the ONLY authority on position sizing and limits. The strategy
 proposes; code disposes. Any decision failing a check is rejected and
 journaled with the rejection reasons.
 """
@@ -194,7 +194,7 @@ def check_decision(
     journal: Iterable[Mapping],
     config: Any,
 ) -> RiskVerdict:
-    """Veto gate for an LLM decision. Returns approved=True only if all
+    """Veto gate for a strategy decision. Returns approved=True only if all
     checks pass.
 
     Checks performed (in order):
@@ -235,6 +235,20 @@ def check_decision(
     if action in ("close", "modify"):
         return RiskVerdict(True, [])
 
+    # --- Daily loss halt: an explicit, journal-friendly stop for the day.
+    # Once realised P/L has hit the cap, no new entries are proposed for
+    # the rest of the UTC day. (The projected-risk cap further below is a
+    # second layer that also blocks a trade whose own risk would breach it.)
+    max_daily_loss = float(getattr(getattr(config, "risk", None), "max_daily_loss_pct", 3.0))
+    realised = daily_realized_pl(journal)
+    starting = float(getattr(account_state, "starting_balance_today", account_state.balance) or account_state.balance)
+    realised_pct = (realised / starting) * 100.0 if starting > 0 else 0.0
+    if max_daily_loss > 0 and realised_pct <= -max_daily_loss:
+        return RiskVerdict(
+            False,
+            [f"daily_loss_halt_engaged:realised={realised_pct:.2f}%<={-max_daily_loss:.2f}%"],
+        )
+
     # --- "propose": enforce full set of rules ---
     symbol = getattr(decision, "symbol", "")
     watchlist = list(getattr(config, "symbols", []) or [])
@@ -268,11 +282,11 @@ def check_decision(
     if confidence < min_conf:
         reasons.append(f"confidence_below_min:{confidence:.2f}<{min_conf:.2f}")
 
-    # risk_pct cap (use config if lower than LLM's).
+    # risk_pct cap (use config if lower than the strategy's suggestion).
     max_risk = float(getattr(getattr(config, "risk", None), "max_risk_pct_per_trade", 1.0))
-    llm_risk = float(getattr(decision, "risk_pct", 0.0) or 0.0)
-    if llm_risk > max_risk:
-        reasons.append(f"risk_pct_above_max:{llm_risk:.2f}>{max_risk:.2f}")
+    suggested_risk = float(getattr(decision, "risk_pct", 0.0) or 0.0)
+    if suggested_risk > max_risk:
+        reasons.append(f"risk_pct_above_max:{suggested_risk:.2f}>{max_risk:.2f}")
 
     # Open-trade cap.
     open_count = _count_open_trades(open_positions)
@@ -286,14 +300,10 @@ def check_decision(
     if today_count >= max_today:
         reasons.append(f"max_trades_per_day_reached:{today_count}>={max_today}")
 
-    # Daily loss cap.
-    max_daily_loss = float(getattr(getattr(config, "risk", None), "max_daily_loss_pct", 3.0))
-    realised = daily_realized_pl(journal)
-    starting = float(getattr(account_state, "starting_balance_today", account_state.balance) or account_state.balance)
+    # Daily loss cap (second layer): realised P/L + this trade's projected
+    # risk must not exceed max_daily_loss_pct.
     if starting > 0:
-        # Convert realised (account ccy) to a percentage of starting equity.
-        realised_pct = (realised / starting) * 100.0
-        projected_risk_pct = float(llm_risk) if llm_risk > 0 else 0.0
+        projected_risk_pct = float(suggested_risk) if suggested_risk > 0 else 0.0
         if -realised_pct + projected_risk_pct > max_daily_loss:
             reasons.append(
                 f"daily_loss_cap_exceeded:realised={realised_pct:.2f}% "

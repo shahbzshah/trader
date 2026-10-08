@@ -4,28 +4,25 @@ Generates ``reports/YYYY-MM-DD.md`` (and ``reports/YYYY-MM-DD-week.md``)
 with:
   - a stats block (trades, win/loss, realised P/L, risk used)
   - every decision with reasoning
-  - a short LLM-generated "Playbook update proposals" section that
-    compares recent outcomes to the existing playbook text.
+  - a short deterministic "Playbook update proposals" section derived
+    from journal statistics (heuristic flags, no LLM).
 
-The LLM proposals are **advisory only**; this module never edits
+The proposals are **advisory only**; this module never edits
 ``knowledge/``.
 
 The function is intentionally synchronous and pure with respect to
-its inputs (a Journal and an LLMClient). It can be invoked manually
-via ``app review`` or wired into the scheduler.
+its inputs (a Journal). It can be invoked manually via ``app review``
+or wired into the scheduler.
 """
 
 from __future__ import annotations
 
 import datetime as _dt
-import json
 import logging
-import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Mapping, Sequence
 
-from app.brain import LLMClient, extract_json_object, load_playbooks
 from app.journal import Journal
 
 logger = logging.getLogger(__name__)
@@ -181,7 +178,7 @@ def _render_decisions_md(decisions: Sequence[Mapping]) -> str:
 
 def _render_proposals_md(proposals: Sequence[Mapping]) -> str:
     if not proposals:
-        return "_No proposals generated (insufficient data or LLM declined)._\n"
+        return "_No proposals -- not enough data or nothing flagged._\n"
     lines: list[str] = []
     for p in proposals:
         title = str(p.get("title") or p.get("playbook") or "Proposal")
@@ -235,89 +232,63 @@ def render_report(
 
 
 # ---------------------------------------------------------------------------
-# LLM-driven proposal generation
+# Deterministic proposal generation (no LLM)
 # ---------------------------------------------------------------------------
 
 
-_PROPOSAL_SYSTEM = """You are a trading coach reviewing yesterday's agent decisions
-and outcomes. Compare them to the playbooks in the system prompt and
-identify concrete, minimal changes the human trader should consider.
+def generate_proposals(decisions: Sequence[Mapping]) -> list[dict]:
+    """Advisory playbook-update proposals from journal statistics.
 
-Rules:
-- Output ONLY a JSON object. No prose, no markdown fences.
-- The JSON schema:
-  {{"proposals": [
-    {{"playbook": "<filename>", "title": "<short>",
-      "rationale": "<one paragraph citing concrete decision IDs/numbers>"}}
-  ]}}
-- If everything looks fine, return {"proposals": []}.
-- Do NOT propose changes you cannot justify with the decisions provided.
-- Do NOT exceed 5 proposals.
-"""
-
-
-def _summarise_decisions_for_llm(decisions: Sequence[Mapping]) -> str:
-    rows: list[dict] = []
-    for d in decisions[:200]:
-        rows.append({
-            "id": d["id"],
-            "ts": d["ts"],
-            "symbol": d["symbol"],
-            "action": d["action"],
-            "playbook": d.get("playbook"),
-            "confidence": d.get("confidence"),
-            "approved": d["approved"],
-            "reject_reasons": d.get("reject_reasons", []),
-            "reasoning": (d.get("reasoning") or "")[:200],
-        })
-    return json.dumps({"decisions": rows, "stats_count": len(decisions)}, indent=2)
-
-
-def generate_proposals(
-    decisions: Sequence[Mapping],
-    playbooks: Sequence[Mapping],
-    llm_client: LLMClient,
-    *,
-    temperature: float = 0.2,
-) -> list[dict]:
-    """Ask the LLM for advisory playbook-update proposals.
-
-    Returns an empty list on network / parse failure (advisory, never
-    raises into the report writer).
+    Pure and deterministic. Flags structural issues a human should look
+    at: setups that never trigger, proposals the risk gate keeps vetoing,
+    and dominant rejection reasons. Never edits ``knowledge/``.
     """
-    if not decisions or not playbooks:
-        return []
-    playbook_text = "\n\n".join(
-        f"## {p['name']}\n{p['body']}" for p in playbooks
-    )
-    system_msg = {
-        "role": "system",
-        "content": _PROPOSAL_SYSTEM + "\n\n# Playbooks (reference)\n" + playbook_text,
-    }
-    user_msg = {
-        "role": "user",
-        "content": "Decisions from the most recent review window:\n\n"
-                    + _summarise_decisions_for_llm(decisions),
-    }
-    try:
-        resp = llm_client.chat([system_msg, user_msg], temperature=temperature)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("review LLM call failed: %s", exc)
-        return []
-    parsed = extract_json_object(resp.content) or {}
-    proposals = parsed.get("proposals", [])
-    if not isinstance(proposals, list):
-        return []
-    out: list[dict] = []
-    for p in proposals[:5]:
-        if not isinstance(p, dict):
-            continue
-        out.append({
-            "playbook": str(p.get("playbook", "")),
-            "title": str(p.get("title", "Proposal")),
-            "body": str(p.get("rationale", p.get("body", ""))),
-        })
-    return out
+    proposals: list[dict] = []
+    if not decisions:
+        return proposals
+
+    by_pb: dict[str, list] = {}
+    for d in decisions:
+        by_pb.setdefault(str(d.get("playbook") or "unknown"), []).append(d)
+
+    for pb, rows in sorted(by_pb.items()):
+        proposes = [r for r in rows if r.get("action") == "propose"]
+        if len(rows) >= 20 and len(proposes) / len(rows) < 0.05:
+            proposals.append({
+                "playbook": pb,
+                "title": f"{pb}: setup rarely triggers",
+                "body": (f"Only {len(proposes)}/{len(rows)} decisions proposed a trade. "
+                         "If this persists across weeks, consider widening the trigger "
+                         "(e.g. larger sweep lookback) or checking the session filter."),
+            })
+        vetoed = [r for r in proposes if not r.get("approved")]
+        if len(proposes) >= 10 and len(vetoed) / len(proposes) > 0.5:
+            proposals.append({
+                "playbook": pb,
+                "title": f"{pb}: risk gate vetoes most proposals",
+                "body": (f"{len(vetoed)}/{len(proposes)} proposals were rejected by risk.py. "
+                         "Review the dominant reject reasons below -- the strategy may be "
+                         "over-trading into the daily-loss or open-trade caps."),
+            })
+
+    # Most common rejection reasons across all decisions.
+    reason_counts: dict[str, int] = {}
+    for d in decisions:
+        for r in (d.get("reject_reasons") or []):
+            key = str(r).split(":")[0]
+            reason_counts[key] = reason_counts.get(key, 0) + 1
+    if reason_counts:
+        top = sorted(reason_counts.items(), key=lambda kv: kv[1], reverse=True)[0]
+        if top[1] >= 5:
+            proposals.append({
+                "playbook": "",
+                "title": f"Dominant reject reason: {top[0]} ({top[1]}x)",
+                "body": ("This veto fired most often. If it is 'max_trades_per_day_reached' "
+                         "or 'max_open_trades_reached', the caps are doing their job. If it is "
+                         "'confidence_below_min' or 'spread', the setup may be firing in "
+                         "conditions it should skip -- tighten the strategy filters."),
+            })
+    return proposals[:5]
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +300,6 @@ def generate_report(
     journal: Journal,
     *,
     day: _dt.date | None = None,
-    llm_client: LLMClient | None = None,
     knowledge_dir: Path | str | None = None,
     reports_dir: Path | str | None = None,
 ) -> Path:
@@ -348,12 +318,8 @@ def generate_report(
         if d["ts"] < end_ts
     ]
 
-    # Optional LLM-driven proposals.
-    proposals: list[dict] = []
-    if llm_client is not None:
-        kdir = Path(knowledge_dir) if knowledge_dir else Path("knowledge")
-        playbooks = load_playbooks(kdir)
-        proposals = generate_proposals(decisions, playbooks, llm_client)
+    # Deterministic advisory proposals from journal statistics.
+    proposals = generate_proposals(decisions)
 
     md = render_report(stats, decisions, proposals, day=target)
 

@@ -13,7 +13,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 # Ensure no stray env vars leak into config tests.
-for key in ("MT5_LOGIN", "MT5_PASSWORD", "MT5_SERVER", "MT5_PATH", "LLM_API_KEY"):
+for key in ("MT5_LOGIN", "MT5_PASSWORD", "MT5_SERVER", "MT5_PATH"):
     os.environ.pop(key, None)
 
 
@@ -49,8 +49,7 @@ def env_path(repo_root: Path, tmp_path: Path) -> Path:
         "MT5_LOGIN=12345\n"
         "MT5_PASSWORD=secret\n"
         "MT5_SERVER=Broker-Demo\n"
-        "MT5_PATH=\n"
-        "LLM_API_KEY=sk-test-xyz\n",
+        "MT5_PATH=\n",
         encoding="utf-8",
     )
     return p

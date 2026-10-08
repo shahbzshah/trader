@@ -6,14 +6,12 @@ Acceptance: generates a report from seeded journal fixture rows.
 from __future__ import annotations
 
 import datetime as _dt
-import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
-from app.brain import LLMClient
 from app.journal import Journal
 from app.review import (
     ReviewStats,
@@ -22,7 +20,6 @@ from app.review import (
     generate_report,
     render_report,
 )
-from tests.fake_http import make_chat_response, recording_transport
 
 
 # ---------------------------------------------------------------------------
@@ -138,8 +135,8 @@ def test_render_report_includes_stats_and_decisions(tmp_path: Path):
     # Advisory section always present.
     assert "## Playbook update proposals" in md
     assert "advisory only" in md.lower()
-    # Without LLM proposals, the empty-state copy is shown.
-    assert "No proposals generated" in md
+    # With no proposals, the empty-state copy is shown.
+    assert "No proposals" in md
 
 
 def test_render_report_includes_proposals(tmp_path: Path):
@@ -171,80 +168,51 @@ def test_render_report_handles_no_decisions():
 
 
 # ---------------------------------------------------------------------------
-# generate_proposals (with mocked LLM)
+# ---------------------------------------------------------------------------
+# generate_proposals (deterministic, no LLM)
 # ---------------------------------------------------------------------------
 
 
-def test_generate_proposals_parses_llm_response(tmp_path: Path):
-    playbooks = [
-        {"name": "breakout_retest", "body": "Body A", "path": "a.md"},
-    ]
-    transport, _ = recording_transport([make_chat_response(json.dumps({
-        "proposals": [
-            {"playbook": "a.md", "title": "Tighten SL",
-             "rationale": "Two losses came from wide stops."},
-            {"playbook": "a.md", "title": "Skip news",
-             "rationale": "Losses cluster near 16:00 UTC."},
-        ]
-    }))])
-    client = LLMClient(base_url="http://x", model="m", api_key="", timeout=5.0,
-                         transport=transport)
-    out = generate_proposals(
-        decisions=[{"id": 1, "ts": 1, "symbol": "EURUSD", "action": "propose",
-                    "playbook": "a.md", "confidence": 0.8, "approved": True,
-                    "reject_reasons": [], "reasoning": "x"}],
-        playbooks=playbooks,
-        llm_client=client,
-    )
-    assert len(out) == 2
-    assert out[0]["title"] == "Tighten SL"
-    assert "Two losses" in out[0]["body"]
+def _mk(ts=1, **kw):
+    d = {"id": 1, "ts": ts, "symbol": "EURUSD", "action": "no_trade",
+         "playbook": "sweep_fvg_reclaim", "confidence": 0.75,
+         "approved": True, "reject_reasons": [], "reasoning": "x"}
+    d.update(kw)
+    return d
 
 
 def test_generate_proposals_empty_when_no_decisions():
-    transport, _ = recording_transport([])
-    client = LLMClient(base_url="http://x", model="m", api_key="", timeout=5.0,
-                         transport=transport)
-    out = generate_proposals(
-        decisions=[], playbooks=[{"name": "x", "body": "y", "path": "x.md"}],
-        llm_client=client,
-    )
-    assert out == []
+    assert generate_proposals([]) == []
 
 
-def test_generate_proposals_empty_proposals_response():
-    transport, _ = recording_transport([make_chat_response(json.dumps({
-        "proposals": []
-    }))])
-    client = LLMClient(base_url="http://x", model="m", api_key="", timeout=5.0,
-                         transport=transport)
-    out = generate_proposals(
-        decisions=[{"id": 1, "ts": 1, "symbol": "EURUSD", "action": "no_trade",
-                    "playbook": "a", "confidence": 0.5, "approved": True,
-                    "reject_reasons": [], "reasoning": "x"}],
-        playbooks=[{"name": "x", "body": "y", "path": "x.md"}],
-        llm_client=client,
-    )
-    assert out == []
+def test_generate_proposals_flags_rarely_triggering_setup():
+    rows = [_mk(ts=i, action="no_trade") for i in range(30)]
+    rows += [_mk(ts=100, action="propose")]
+    out = generate_proposals(rows)
+    assert any("rarely triggers" in p["title"] for p in out)
 
 
-def test_generate_proposals_swallows_network_error():
-    from tests.fake_http import make_raising_transport
-    import httpx
-    transport = make_raising_transport(httpx.ConnectError("boom"))
-    client = LLMClient(base_url="http://x", model="m", api_key="", timeout=1.0,
-                         transport=transport)
-    out = generate_proposals(
-        decisions=[{"id": 1, "ts": 1, "symbol": "EURUSD", "action": "no_trade",
-                    "playbook": "a", "confidence": 0.5, "approved": True,
-                    "reject_reasons": [], "reasoning": "x"}],
-        playbooks=[{"name": "x", "body": "y", "path": "x.md"}],
-        llm_client=client,
-    )
-    assert out == []
+def test_generate_proposals_flags_veto_heavy_playbook():
+    rows = [_mk(ts=i, action="propose", approved=False,
+               reject_reasons=["max_trades_per_day_reached"])
+            for i in range(12)]
+    out = generate_proposals(rows)
+    assert any("vetoes most proposals" in p["title"] for p in out)
 
 
-# ---------------------------------------------------------------------------
+def test_generate_proposals_flags_dominant_reject_reason():
+    rows = [_mk(ts=i, action="propose", approved=False,
+               reject_reasons=["spread_too_wide"]) for i in range(6)]
+    out = generate_proposals(rows)
+    assert any("spread_too_wide" in p["title"] for p in out)
+
+
+def test_generate_proposals_healthy_day_is_quiet():
+    rows = [_mk(ts=i, action="propose", approved=True) for i in range(5)]
+    rows += [_mk(ts=100 + i, action="no_trade") for i in range(5)]
+    assert generate_proposals(rows) == []
+
+
 # generate_report (top-level: writes file + records review)
 # ---------------------------------------------------------------------------
 
@@ -257,7 +225,6 @@ def test_generate_report_writes_markdown_and_journals(tmp_path: Path):
     out = generate_report(
         j,
         day=day,
-        llm_client=None,
         knowledge_dir=Path("knowledge"),
         reports_dir=tmp_path / "reports",
     )
@@ -282,26 +249,6 @@ def test_generate_report_default_day_is_today(tmp_path: Path):
     assert today in out.read_text(encoding="utf-8")
 
 
-def test_generate_report_with_mocked_llm(tmp_path: Path):
-    j = Journal(tmp_path / "j.db")
-    day = _dt.datetime(2026, 8, 31, tzinfo=_dt.timezone.utc).date()
-    _seed_journal(j, day=day)
-    transport, _ = recording_transport([make_chat_response(json.dumps({
-        "proposals": [{"playbook": "breakout_retest.md",
-                        "title": "Refine confirmation",
-                        "rationale": "Confirmations fired too late."}]
-    }))])
-    client = LLMClient(base_url="http://x", model="m", api_key="", timeout=5.0,
-                         transport=transport)
-    out = generate_report(
-        j, day=day, llm_client=client,
-        knowledge_dir=Path("knowledge"),
-        reports_dir=tmp_path / "reports",
-    )
-    text = out.read_text(encoding="utf-8")
-    assert "Refine confirmation" in text
-
-
 def test_review_does_not_edit_knowledge(tmp_path: Path):
     """The review must NEVER write to knowledge/."""
     # Make a fresh knowledge dir we can scan for changes.
@@ -314,7 +261,7 @@ def test_review_does_not_edit_knowledge(tmp_path: Path):
     day = _dt.datetime(2026, 8, 31, tzinfo=_dt.timezone.utc).date()
     _seed_journal(j, day=day)
     generate_report(
-        j, day=day, llm_client=None,
+        j, day=day,
         knowledge_dir=kdir, reports_dir=tmp_path / "reports",
     )
     # Knowledge file untouched.
@@ -337,8 +284,7 @@ schedule: {{scan_interval_minutes: 15}}
 session_hours: {{start: '00:00', end: '23:59'}}
 risk: {{max_risk_pct_per_trade: 1.0, max_daily_loss_pct: 3.0,
        max_open_trades: 3, max_trades_per_day: 5, min_confidence: 0.6,
-       default_playbook: breakout_retest}}
-llm: {{base_url: 'http://x', model: 'm'}}
+       default_playbook: sweep_fvg_reclaim}}
 paths: {{data_dir: '{tmp_path.as_posix().replace(chr(92), '/')}',
          logs_dir: '{tmp_path.as_posix().replace(chr(92), '/')}',
          reports_dir: '{(tmp_path / 'reports').as_posix()}',
@@ -352,7 +298,7 @@ paths: {{data_dir: '{tmp_path.as_posix().replace(chr(92), '/')}',
     j = Journal(tmp_path / "journal.db")
     _seed_journal(j, day=_dt.datetime.now(_dt.timezone.utc).date())
 
-    rc = main_module.main(["--config", str(cfg_path), "review", "--no-llm"])
+    rc = main_module.main(["--config", str(cfg_path), "review"])
     out = capsys.readouterr().out
     assert rc == 0
     assert "wrote" in out

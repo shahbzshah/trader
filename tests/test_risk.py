@@ -337,8 +337,7 @@ def test_check_decision_daily_loss_cap_exceeded(monkeypatch):
     import app.risk as risk_mod
     fixed = _dt.datetime(2026, 8, 31, 12, 0, 0, tzinfo=_dt.timezone.utc)
     monkeypatch.setattr(risk_mod, "_now_utc", lambda: fixed)
-    # -4% realised today (cap is -3%). Even with this trade's 1% risk
-    # we are already over.
+    # -4% realised today (cap is -3%). The explicit daily halt fires first.
     rows = [
         {"kind": "order_closed", "ts": fixed.timestamp() - 3600,
          "profit": -400.0},  # 4% of 10,000
@@ -349,7 +348,45 @@ def test_check_decision_daily_loss_cap_exceeded(monkeypatch):
         [], rows, cfg,
     )
     assert v.approved is False
+    assert any("daily_loss_halt_engaged" in r for r in v.reasons)
+
+
+def test_check_decision_daily_loss_projected_cap_still_blocks(monkeypatch):
+    # Second layer: realised -2.5% has NOT hit the halt, but this trade's
+    # 1% risk would breach the 3% cap -> daily_loss_cap_exceeded.
+    cfg = _default_cfg()
+    d = Decision(action="propose", risk_pct=1.0)
+    import datetime as _dt
+    import app.risk as risk_mod
+    fixed = _dt.datetime(2026, 8, 31, 12, 0, 0, tzinfo=_dt.timezone.utc)
+    monkeypatch.setattr(risk_mod, "_now_utc", lambda: fixed)
+    rows = [
+        {"kind": "order_closed", "ts": fixed.timestamp() - 3600,
+         "profit": -250.0},  # 2.5% of 10,000
+    ]
+    v = check_decision(
+        d,
+        _account(starting_balance=10000.0),
+        [], rows, cfg,
+    )
+    assert v.approved is False
     assert any("daily_loss_cap_exceeded" in r for r in v.reasons)
+    assert not any("daily_loss_halt_engaged" in r for r in v.reasons)
+
+
+def test_check_decision_no_halt_when_day_is_green(monkeypatch):
+    cfg = _default_cfg()
+    d = Decision(action="propose", confidence=0.8, risk_pct=0.5)
+    import datetime as _dt
+    import app.risk as risk_mod
+    fixed = _dt.datetime(2026, 8, 31, 12, 0, 0, tzinfo=_dt.timezone.utc)
+    monkeypatch.setattr(risk_mod, "_now_utc", lambda: fixed)
+    rows = [
+        {"kind": "order_closed", "ts": fixed.timestamp() - 3600,
+         "profit": 150.0},
+    ]
+    v = check_decision(d, _account(), [], rows, cfg)
+    assert v.approved is True
 
 
 def test_check_decision_approved_when_all_pass():

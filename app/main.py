@@ -1,19 +1,17 @@
-"""CLI entrypoint: run | once | analyze | status | kill | resume."""
+"""CLI entrypoint: run | once | analyze | backtest | status | kill | resume."""
 
 from __future__ import annotations
 
 import argparse
 import datetime as _dt
-import json
 import logging
 import sys
 from pathlib import Path
 
 from app.config import EnvSecrets, load_config
 
-# Eagerly expose MT5Client + LLMClient so tests can monkeypatch them.
+# Eagerly expose MT5Client so tests can monkeypatch it.
 from app.mt5_client import MT5Client  # noqa: F401  (re-exported for tests)
-from app.brain import LLMClient  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +181,7 @@ def _cmd_once(args: argparse.Namespace) -> int:
 
 
 def _build_components(args: argparse.Namespace, cfg, *, analyze_only: bool):
-    """Construct client, journal, executor, and brain LLMClient.
+    """Construct client, journal, and executor.
 
     Returns None and prints a clean error if MT5 can't be reached.
     """
@@ -216,7 +214,7 @@ def _build_components(args: argparse.Namespace, cfg, *, analyze_only: bool):
 
 def run_once(components: dict) -> dict:
     """One full scan cycle. Returns a small result dict for callers/tests."""
-    from app.brain import decide, load_playbooks
+    from app.brain import decide
     from app.scanner import scan_watchlist
 
     cfg = components["cfg"]
@@ -224,19 +222,6 @@ def run_once(components: dict) -> dict:
     journal = components["journal"]
     executor = components["executor"]
     analyze_only = components["analyze_only"]
-
-    playbooks = load_playbooks(
-        Path(getattr(getattr(cfg, "paths", None), "knowledge_dir", "knowledge"))
-    )
-
-    # Build a single LLM client at module scope (LLMClient is patchable
-    # on the main module for tests).
-    llm_client = LLMClient(
-        base_url=cfg.llm.base_url,
-        model=cfg.llm.model,
-        api_key=cfg.llm_api_key or "",
-        timeout=float(cfg.llm.timeout_seconds),
-    )
 
     snapshots = scan_watchlist(client, cfg)
 
@@ -252,43 +237,47 @@ def run_once(components: dict) -> dict:
         equity_rows = 0
 
     decisions = rejected = orders = 0
+    from app import news as news_mod
+
+    blackout = news_mod.current_blackout(cfg)
+    if blackout is not None:
+        logger.warning(
+            "news blackout active: %s (%s) at %s UTC — standing down this cycle",
+            blackout.title,
+            blackout.currency,
+            blackout.time_utc.strftime("%H:%M"),
+        )
     for snap in snapshots:
         if not analyze_only and components.get("kill_switch", False):
             break
-        try:
-            decision, raw = decide(
-                snap,
-                playbooks,
-                journal_tail=journal.list_decisions(limit=20),
-                portfolio_state={"daily_pnl": 0.0, "remaining_risk_pct": 100.0},
-                config=cfg,
-                client=llm_client,
+        if blackout is not None:
+            journal.record_decision(
+                symbol=snap.get("symbol", ""),
+                action="no_trade",
+                reasoning=(
+                    f"news blackout: {blackout.title} "
+                    f"({blackout.currency}, {blackout.impact}) at "
+                    f"{blackout.time_utc.strftime('%H:%M')} UTC"
+                ),
+                approved=True,
+                reject_reasons=[],
+                raw_llm_json="",
             )
+            decisions += 1
+            continue
+        try:
+            decision = decide(snap, cfg)
         except Exception as exc:  # noqa: BLE001
             journal.record_decision(
                 symbol=snap.get("symbol", ""),
                 action="error",
                 reasoning=str(exc),
                 approved=False,
-                reject_reasons=[f"brain_error:{exc}"],
+                reject_reasons=[f"strategy_error:{exc}"],
                 raw_llm_json="",
             )
             rejected += 1
             decisions += 1
-            continue
-
-        if decision is None:
-            journal.record_decision(
-                symbol=snap.get("symbol", ""),
-                action="error",
-                reasoning="llm parse failed",
-                approved=False,
-                reject_reasons=["llm_parse_failed"],
-                raw_llm_json=json.dumps(raw) if isinstance(raw, (dict, list))
-                                 else str(raw),
-            )
-            decisions += 1
-            rejected += 1
             continue
 
         decisions += 1
@@ -303,17 +292,31 @@ def run_once(components: dict) -> dict:
                 reasoning=decision.reasoning,
                 approved=True,
                 reject_reasons=[],
-                raw_llm_json=json.dumps(raw) if isinstance(raw, (dict, list))
-                                 else str(raw),
+                raw_llm_json=decision.model_dump_json(),
             )
             continue
 
-        result = executor.execute(decision, raw_llm_json=json.dumps(raw)
-                                  if isinstance(raw, (dict, list)) else str(raw))
+        result = executor.execute(decision,
+                                  raw_llm_json=decision.model_dump_json())
         if result.status == "rejected":
             rejected += 1
         elif result.status in ("filled", "closed", "modified"):
             orders += 1
+
+    # Position management: breakeven stop moves. Risk-reducing only, so it
+    # runs even during a news blackout. Skipped in analyze-only mode and
+    # when the kill switch is engaged.
+    if (not analyze_only and executor is not None
+            and not components.get("kill_switch", False)):
+        try:
+            from app.manage import breakeven_moves
+            for mdec in breakeven_moves(client.positions(), cfg):
+                mres = executor.execute(
+                    mdec, raw_llm_json=mdec.model_dump_json())
+                if mres.status == "modified":
+                    orders += 1
+        except Exception:  # noqa: BLE001
+            logger.exception("breakeven management step failed")
 
     return {
         "decisions": decisions,
@@ -325,7 +328,7 @@ def run_once(components: dict) -> dict:
 
 def _cmd_analyze(args: argparse.Namespace) -> int:
     """Decide + journal but NEVER order. ``--dry`` is the default behaviour."""
-    from app.brain import decide, load_playbooks
+    from app.brain import decide
     from app.risk import AccountState, RiskVerdict, check_decision
     from app.scanner import scan_watchlist
 
@@ -356,10 +359,6 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         except Exception:  # noqa: BLE001
             pass
 
-    playbooks = load_playbooks(
-        Path(getattr(getattr(cfg, "paths", None), "knowledge_dir", "knowledge"))
-    )
-
     starting_balance = float(getattr(getattr(client, "_last_account", None), "balance", 0.0) or 0.0)
     kill_path = Path(cfg.paths.kill_switch_path)
     account_state = AccountState(
@@ -370,28 +369,20 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         kill_switch_engaged=kill_path.exists(),
     )
 
-    for snap in snapshots:
-        try:
-            llm_client = LLMClient(
-                base_url=cfg.llm.base_url,
-                model=cfg.llm.model,
-                api_key=cfg.llm_api_key or "",
-                timeout=float(cfg.llm.timeout_seconds),
-            )
-            decision, raw = decide(
-                snap,
-                playbooks,
-                journal_tail=[],
-                portfolio_state={"daily_pnl": 0.0, "remaining_risk_pct": 100.0},
-                config=cfg,
-                client=llm_client,
-            )
-        except Exception as exc:  # noqa: BLE001
-            print(f"[{snap.get('symbol')}] brain error: {exc}")
-            continue
+    from app import news as news_mod
 
-        if decision is None:
-            print(f"[{snap.get('symbol')}] no parseable decision: {raw!r}")
+    blackout_event = news_mod.current_blackout(cfg)
+    for snap in snapshots:
+        if blackout_event is not None:
+            print(
+                f"[{snap.get('symbol')}] action=no_trade "
+                f"(news blackout: {blackout_event.title})"
+            )
+            continue
+        try:
+            decision = decide(snap, cfg)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{snap.get('symbol')}] strategy error: {exc}")
             continue
 
         verdict: RiskVerdict = check_decision(
@@ -442,15 +433,6 @@ def _cmd_review(args: argparse.Namespace) -> int:
 
     journal = Journal(Path(cfg.paths.data_dir) / "journal.db")
 
-    llm_client = None
-    if not args.no_llm and cfg.llm_api_key:
-        llm_client = LLMClient(
-            base_url=cfg.llm.base_url,
-            model=cfg.llm.model,
-            api_key=cfg.llm_api_key,
-            timeout=float(cfg.llm.timeout_seconds),
-        )
-
     day = None
     if args.day:
         try:
@@ -462,11 +444,37 @@ def _cmd_review(args: argparse.Namespace) -> int:
     path = generate_report(
         journal,
         day=day,
-        llm_client=llm_client,
         knowledge_dir=Path(cfg.paths.knowledge_dir),
         reports_dir=Path(cfg.paths.reports_dir),
     )
     print(f"wrote {path}")
+    return 0
+
+
+def _cmd_backtest(args: argparse.Namespace) -> int:
+    """Paper backtest of the rules engine on historical CSV candles.
+
+    No MT5, no network. Replays closed candles through
+    scanner -> strategy -> risk with paper sizing.
+    """
+    from app.backtest import run_backtest
+
+    cfg = load_config(args.config)
+    summary = run_backtest(
+        args.csv,
+        symbol=args.symbol,
+        timeframe=args.timeframe,
+        config=cfg,
+    )
+    print(f"Backtest {summary['symbol']} {summary['timeframe']}: "
+          f"{summary['bars']} bars")
+    print(f"Trades: {summary['trades']} | "
+          f"Wins: {summary['wins']} ({summary['win_rate_pct']:.1f}%) | "
+          f"Avg R: {summary['avg_r']:+.2f} | "
+          f"Profit factor: {summary['profit_factor']:.2f}")
+    print(f"Max drawdown: {summary['max_drawdown_pct']:.2f}% | "
+          f"Final equity: ${summary['final_equity']:.2f} "
+          f"({summary['return_pct']:+.2f}%)")
     return 0
 
 
@@ -480,7 +488,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
       4. every configured symbol is present / selectable and serves live
          rates + ticks (``doctor`` suggests broker-suffix matches when a
          configured name is absent),
-      5. the LLM endpoint answers,
+      5. the rules engine passes a self-test,
       6. the kill switch is off.
 
     Returns 0 only when no check FAILs (warnings are non-fatal).
@@ -553,24 +561,35 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             add(f"symbol {symbol} live data", "fail",
                 f"{type(exc).__name__}: {exc}")
 
-    # 5. LLM endpoint.
-    if cfg.llm_api_key:
-        try:
-            llm = LLMClient(
-                base_url=cfg.llm.base_url,
-                model=cfg.llm.model,
-                api_key=cfg.llm_api_key,
-                timeout=float(cfg.llm.timeout_seconds),
-            )
-            llm.chat([{"role": "user",
-                       "content": "reply with the single word: ok"}], 0.0)
-            add("LLM endpoint", "ok", f"{cfg.llm.base_url} model={cfg.llm.model}")
-        except Exception as exc:  # noqa: BLE001
-            add("LLM endpoint", "fail", f"{type(exc).__name__}: {exc}")
-    else:
-        add("LLM endpoint", "warn", "LLM_API_KEY missing from .env")
+    # 5. Rules engine self-test: a synthetic snapshot must decide cleanly.
+    try:
+        from app.strategy import decide
+        probe = decide({"symbol": "XAUUSD", "timeframes": {}}, cfg)
+        assert probe.action == "no_trade"
+        add("rules engine", "ok", "strategy.decide self-test passed")
+    except Exception as exc:  # noqa: BLE001
+        add("rules engine", "fail", f"{type(exc).__name__}: {exc}")
 
-    # 6. Kill switch.
+    # 6. News calendar feed (fail-open: warn only, never fail).
+    try:
+        from app import news as news_mod
+
+        events = news_mod.get_events(cfg)
+        now = _dt.datetime.now(_dt.timezone.utc)
+        upcoming = [
+            e for e in events
+            if e.time_utc >= now - _dt.timedelta(hours=1)
+        ][:3]
+        detail = f"{len(events)} high-impact event(s) this week"
+        if upcoming:
+            detail += "; next: " + ", ".join(
+                f"{e.title} {e.time_utc.strftime('%a %H:%M')}Z" for e in upcoming
+            )
+        add("news calendar", "ok", detail)
+    except Exception as exc:  # noqa: BLE001
+        add("news calendar", "warn", f"feed unreachable, fail-open: {exc}")
+
+    # 7. Kill switch.
     ks = Path(cfg.paths.kill_switch_path)
     if ks.exists():
         add("kill switch", "warn", f"ENGAGED at {ks}")
@@ -626,7 +645,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_analyze.set_defaults(func=_cmd_analyze)
 
     p_doctor = sub.add_parser(
-        "doctor", help="pre-flight self-check of MT5 + LLM + kill switch")
+        "doctor", help="pre-flight self-check of MT5 + rules engine + kill switch")
     p_doctor.add_argument("--login", type=int, default=0)
     p_doctor.add_argument("--password", default="")
     p_doctor.add_argument("--server", default="")
@@ -636,9 +655,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_review = sub.add_parser("review", help="generate daily review report")
     p_review.add_argument("--day", default=None,
                            help="ISO date (YYYY-MM-DD); default = today UTC")
-    p_review.add_argument("--no-llm", action="store_true",
-                           help="skip the LLM-driven proposal section")
     p_review.set_defaults(func=_cmd_review)
+
+    p_backtest = sub.add_parser(
+        "backtest",
+        help="paper backtest of the rules engine on CSV candles (no MT5)")
+    p_backtest.add_argument("--symbol", default="XAUUSD",
+                            help="symbol label for the CSV data")
+    p_backtest.add_argument("--timeframe", default="M15",
+                            help="timeframe label of the CSV candles")
+    p_backtest.add_argument("--csv", required=True,
+                            help="CSV with columns time,open,high,low,close,volume")
+    p_backtest.set_defaults(func=_cmd_backtest)
 
     return parser
 
