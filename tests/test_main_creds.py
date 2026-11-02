@@ -1,8 +1,7 @@
-"""Tests for .env-backed credential resolution in app/main.py.
+"""Tests for .env-backed secret resolution in app/main.py.
 
-The CLI flags must win when provided; otherwise the ``.env`` secrets
-(beside config.yaml) fill the gaps so ``python -m app.main run`` works
-without repeating credentials on the command line.
+OANDA + Telegram secrets come from the .env beside config.yaml (or the
+process environment). Nothing is passed on the CLI.
 """
 
 from __future__ import annotations
@@ -10,49 +9,50 @@ from __future__ import annotations
 import argparse
 
 
-def _args(tmp_path, *, login: int = 0, password: str = "", server: str = "",
-          path: str = "") -> argparse.Namespace:
-    return argparse.Namespace(
-        config=str(tmp_path / "config.yaml"),
-        login=login,
-        password=password,
-        server=server,
-        path=path,
-    )
+def _args(tmp_path) -> argparse.Namespace:
+    return argparse.Namespace(config=str(tmp_path / "config.yaml"))
 
 
-def test_env_file_fills_missing_cli_flags(tmp_path, env_path):
-    from app.main import _resolve_creds
+def test_env_file_fills_secrets(tmp_path, env_path):
+    from app.main import _resolve_secrets
 
-    got = _resolve_creds(_args(tmp_path))
-    assert got == (12345, "secret", "Broker-Demo", "")
-
-
-def test_cli_flags_override_env_file(tmp_path, env_path):
-    from app.main import _resolve_creds
-
-    got = _resolve_creds(
-        _args(tmp_path, login=999, password="cli", server="CLI-Srv", path="C:/mt5")
-    )
-    assert got == (999, "cli", "CLI-Srv", "C:/mt5")
+    got = _resolve_secrets(_args(tmp_path))
+    assert got.oanda_api_token == "tok-abc"
+    assert got.oanda_account_id == "001-011-1234567-001"
+    assert got.telegram_bot_token == "bot-xyz"
+    assert got.telegram_chat_id == "123456789"
 
 
-def test_missing_env_file_yields_zero_creds(tmp_path, monkeypatch):
-    from app.main import _resolve_creds
+def test_missing_env_file_yields_empty_secrets(tmp_path, monkeypatch):
+    from app.main import _resolve_secrets
 
-    for key in ("MT5_LOGIN", "MT5_PASSWORD", "MT5_SERVER", "MT5_PATH"):
+    for key in ("OANDA_API_TOKEN", "OANDA_ACCOUNT_ID",
+                "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
         monkeypatch.delenv(key, raising=False)
-    got = _resolve_creds(_args(tmp_path / "nowhere"))
-    assert got == (0, "", "", "")
+    got = _resolve_secrets(_args(tmp_path / "nowhere"))
+    assert got.oanda_api_token == ""
+    assert got.oanda_account_id == ""
+    assert got.telegram_bot_token == ""
+    assert got.telegram_chat_id == ""
+
+
+def test_process_env_fills_secrets(tmp_path, monkeypatch):
+    from app.main import _resolve_secrets
+
+    monkeypatch.setenv("OANDA_API_TOKEN", "proc-tok")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "555")
+    got = _resolve_secrets(_args(tmp_path / "nowhere"))
+    assert got.oanda_api_token == "proc-tok"
+    assert got.telegram_chat_id == "555"
 
 
 def test_env_path_prefers_config_adjacent_dotenv(tmp_path):
-    from app.main import _env_path_for, _resolve_creds
+    from app.main import _env_path_for, _resolve_secrets
 
     cfg_dir = tmp_path / "cfg"
     cfg_dir.mkdir()
-    (cfg_dir / ".env").write_text("MT5_LOGIN=777\n", encoding="utf-8")
+    (cfg_dir / ".env").write_text("OANDA_API_TOKEN=adjacent-tok\n", encoding="utf-8")
     resolved = _env_path_for(_args(cfg_dir))
     assert resolved.name == ".env"
     assert resolved.parent == cfg_dir.resolve()
-    assert _resolve_creds(_args(cfg_dir))[0] == 777
+    assert _resolve_secrets(_args(cfg_dir)).oanda_api_token == "adjacent-tok"

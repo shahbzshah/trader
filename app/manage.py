@@ -1,8 +1,14 @@
 """Open-position management: breakeven stop moves.
 
-Pure functions over position snapshots. No I/O. The caller (main.run_only /
-run_once) executes the returned ``modify`` Decisions through the normal
-executor pipeline, so risk.py still vets them (demo-mode, kill switch).
+NOTE (signals-only): this module is retained as pure, tested logic for a
+future execution mode, but the signals-only runner never calls it — there
+are no open positions to manage. It is not dead code by accident; it is
+parked deliberately.
+
+Pure functions over position snapshots. No I/O. In the old trading bot
+the caller (main.run_once) executed the returned ``modify`` Decisions
+through the executor pipeline, so risk.py still vetted them (demo-mode,
+kill switch).
 
 A position qualifies for a breakeven move when it is up at least
 ``risk.breakeven_at_r`` R and its stop has not been moved to entry yet.

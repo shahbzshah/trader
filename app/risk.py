@@ -201,8 +201,8 @@ def check_decision(
       1. Kill switch must be off.
       2. Account must be in demo mode.
       3. ``decision.action`` must be one of: "no_trade", "propose", "close",
-         "modify". (This module is also the gate for action type; the
-         executor enforces action-specific rules in M4.)
+         "modify". (This module is also the gate for action type; in the
+         old trading bot the executor enforced action-specific rules.)
       4. For "propose" / "modify": symbol must be on the watchlist; SL must
          be on the correct side of (proposed) entry; confidence must be
          >= ``config.risk.min_confidence``; ``risk_pct`` is clamped to the

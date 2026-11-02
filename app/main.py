@@ -1,17 +1,35 @@
-"""CLI entrypoint: run | once | analyze | backtest | status | kill | resume."""
+"""CLI entrypoint: run | serve | once | analyze | backtest | status | kill | resume.
+
+Signals-only bot: no MT5, no trade execution. The runner scans the
+market feed (OANDA v20 Practice first, Deriv WebSocket as fallback),
+runs the deterministic rules engine, and turns approved setups into
+journaled Telegram signals with paper sizing against a configured
+hypothetical balance.
+
+Commands:
+    run      continuous scan loop (APScheduler) — local use
+    serve    scan loop + dashboard web server on $PORT (Render)
+    once     single cycle; --analyze = propose-only (no alerts)
+    analyze  decide + print, never journals, never alerts
+    status   feed connection + latest tick/candles
+    doctor   pre-flight self-check (feed, rules engine, news, Telegram)
+    backtest paper backtest on CSV candles (no feed, no network)
+    kill     engage the kill switch (stops new signals)
+    resume   release the kill switch
+    review   generate a daily review markdown file
+"""
 
 from __future__ import annotations
 
 import argparse
 import datetime as _dt
 import logging
+import os
 import sys
 from pathlib import Path
 
 from app.config import EnvSecrets, load_config
-
-# Eagerly expose MT5Client so tests can monkeypatch it.
-from app.mt5_client import MT5Client  # noqa: F401  (re-exported for tests)
+from app.market_data import MarketDataClient, MarketDataError, Rates
 
 logger = logging.getLogger(__name__)
 
@@ -51,19 +69,65 @@ def _env_path_for(args: argparse.Namespace) -> Path | None:
     return Path(str(cfg_path)).resolve().parent / ".env"
 
 
-def _resolve_creds(args: argparse.Namespace) -> tuple[int, str, str, str]:
-    """Merge CLI flags with ``.env`` secrets. CLI flags win; secrets fill gaps.
+def _resolve_secrets(args: argparse.Namespace) -> EnvSecrets:
+    """Load OANDA + Telegram secrets from .env / process env."""
+    return EnvSecrets.from_env(_env_path_for(args))
 
-    This is what lets ``python -m app.main run`` work with credentials stored
-    only in ``.env`` -- previously ``--login`` defaulted to ``0`` and the
-    ``.env`` MT5 credentials were loaded but never used.
+
+# --- market-feed construction ---------------------------------------------
+
+def build_market_client(cfg, secrets: EnvSecrets,
+                        feed_override: str | None = None
+                        ) -> tuple[MarketDataClient, str]:
+    """Build and connect the market feed.
+
+    ``feed_override`` (``--feed``) wins over ``cfg.signals.feed``.
+    "auto" (default): OANDA when its credentials are present and the
+    probe succeeds, otherwise Deriv. "oanda"/"deriv" force that feed
+    (OANDA without credentials is an error, not a silent fallback).
+
+    Returns ``(client, source_name)``. Raises :class:`MarketDataError`
+    when no feed can be reached.
     """
-    secrets = EnvSecrets.from_env(_env_path_for(args))
-    login = getattr(args, "login", 0) or secrets.mt5_login or 0
-    password = getattr(args, "password", "") or secrets.mt5_password or ""
-    server = getattr(args, "server", "") or secrets.mt5_server or ""
-    path = getattr(args, "path", "") or secrets.mt5_path or ""
-    return int(login or 0), password or "", server or "", path or ""
+    from app.deriv_client import DerivClient
+    from app.oanda_client import OandaClient
+
+    balance = float(getattr(getattr(cfg, "signals", None),
+                            "hypothetical_balance_usd", 10000.0))
+    feed = (feed_override or getattr(getattr(cfg, "signals", None),
+                                     "feed", "auto") or "auto").lower()
+
+    def _deriv() -> DerivClient:
+        client = DerivClient(hypothetical_balance=balance)
+        client.connect()
+        return client
+
+    def _oanda() -> OandaClient:
+        client = OandaClient(
+            token=secrets.oanda_api_token,
+            account_id=secrets.oanda_account_id,
+            hypothetical_balance=balance,
+        )
+        client.connect()
+        return client
+
+    if feed == "deriv":
+        return _deriv(), "deriv"
+    if feed == "oanda":
+        if not secrets.oanda_api_token or not secrets.oanda_account_id:
+            raise MarketDataError(
+                "feed=oanda but OANDA_API_TOKEN / OANDA_ACCOUNT_ID are not set"
+            )
+        return _oanda(), "oanda"
+    # auto
+    if secrets.oanda_api_token and secrets.oanda_account_id:
+        try:
+            return _oanda(), "oanda"
+        except MarketDataError as exc:
+            logger.warning("OANDA feed failed (%s); falling back to Deriv", exc)
+    else:
+        logger.info("no OANDA credentials configured; using Deriv feed")
+    return _deriv(), "deriv"
 
 
 _CHECK_LEVELS = {"ok": "[OK]  ", "warn": "[WARN]", "fail": "[FAIL]"}
@@ -77,38 +141,35 @@ def _print_checks(checks: list[tuple[str, str, str]]) -> None:
         print(line)
 
 
+# --- commands ---------------------------------------------------------------
+
 def _cmd_status(args: argparse.Namespace) -> int:
-    """Print connection status. Must not crash when MT5 is unavailable."""
+    """Print feed status. Must not crash when no feed is reachable."""
+    cfg = load_config(args.config)
+    secrets = _resolve_secrets(args)
     try:
-        from app.mt5_client import MT5Client, MT5Error
-
-        client = MT5Client()
-    except ImportError:
-        print("MetaTrader5 package not installed; install with `pip install MetaTrader5`")
+        client, source = build_market_client(
+            cfg, secrets, feed_override=getattr(args, "feed", None))
+    except MarketDataError as exc:
+        print(f"no market feed available: {exc}")
         return 0
-
-    login, password, server, path = _resolve_creds(args)
     try:
-        client.connect(login, password, server, path)
-    except MT5Error as exc:
-        print(f"MT5 terminal not running or login failed: {exc}")
-        return 0
-    except Exception as exc:  # noqa: BLE001
-        print(f"MT5 terminal not running: {exc}")
-        return 0
-
-    try:
-        info = client.account_info()
-        print(
-            f"Connected login={info.login} server={info.server} "
-            f"mode={info.trade_mode} balance={info.balance:.2f} "
-            f"equity={info.equity:.2f}"
-        )
-        positions = client.positions()
-        print(f"Open positions: {len(positions)}")
-        for p in positions:
-            print(f"  {p.ticket} {p.symbol} {p.direction} {p.volume} "
-                  f"@ {p.price_open} p/L={p.profit:.2f}")
+        tick = client.symbol_tick("XAUUSD")
+        if tick is not None:
+            print(
+                f"feed={source} XAUUSD bid={tick.bid:.2f} ask={tick.ask:.2f} "
+                f"spread={tick.spread if tick.spread is None else round(tick.spread, 1)} pts "
+                f"tick_time={_dt.datetime.fromtimestamp(tick.time, tz=_dt.timezone.utc):%H:%M:%S} UTC"
+            )
+        else:
+            print(f"feed={source}: no tick available")
+        rates = client.copy_rates("XAUUSD", "M15", 5)
+        bars = rates.rates if isinstance(rates, Rates) else list(rates)
+        if bars:
+            last = bars[-1]
+            print(f"M15 candles: {len(bars)} (last close {float(last['close']):.2f})")
+        kill = Path(cfg.paths.kill_switch_path).exists()
+        print(f"kill switch: {'ENGAGED' if kill else 'disengaged'}")
     finally:
         client.shutdown()
     return 0
@@ -135,7 +196,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    """Continuous trading loop (APScheduler-driven)."""
+    """Continuous scan loop (APScheduler-driven). Local use."""
     from app.scheduler import Scheduler
 
     cfg = load_config(args.config)
@@ -160,11 +221,60 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_serve(args: argparse.Namespace) -> int:
+    """Scan loop + dashboard web server (Render free web service).
+
+    Binds 0.0.0.0:$PORT (Render sets PORT; defaults to the dashboard
+    port from config.yaml). The scheduler runs in-process; the
+    dashboard reads the same journal + feed.
+    """
+    from app.scheduler import Scheduler
+    from app.server import create_app
+
+    cfg = load_config(args.config)
+    components = _build_components(args, cfg, analyze_only=False)
+    if components is None:
+        return 1
+
+    client = components["client"]
+    if hasattr(client, "start_tick_stream"):
+        try:
+            client.start_tick_stream("XAUUSD")
+        except Exception:  # noqa: BLE001 - stream is monitoring only
+            logger.warning("could not start Deriv tick stream", exc_info=True)
+
+    def cycle() -> None:
+        run_once(components)
+
+    sched = Scheduler(cfg, cycle)
+    sched.start()
+
+    port = int(os.environ.get("PORT") or cfg.dashboard.port)
+    host = "0.0.0.0"  # Render routes to the container's $PORT
+    print(f"serving dashboard on {host}:{port} (feed={components['feed']}); "
+          f"scan interval={cfg.schedule.scan_interval_minutes} min")
+    try:
+        import uvicorn
+
+        uvicorn.run(
+            create_app(args.config, components=components),
+            host=host,
+            port=port,
+            log_level="info",
+        )
+    except KeyboardInterrupt:
+        print("stopping...")
+    finally:
+        sched.stop()
+        client.shutdown()
+    return 0
+
+
 def _cmd_once(args: argparse.Namespace) -> int:
-    """Single full cycle (scan -> brain -> risk -> execute -> journal).
+    """Single full cycle (scan -> decide -> risk -> signal -> journal).
 
     Ignores session hours; honors kill switch. With ``--analyze`` the
-    executor is skipped entirely (propose-only).
+    signal engine is skipped entirely (propose-only, no alerts).
     """
     cfg = load_config(args.config)
     components = _build_components(args, cfg, analyze_only=bool(args.analyze))
@@ -174,39 +284,54 @@ def _cmd_once(args: argparse.Namespace) -> int:
     components["client"].shutdown()
     print(
         f"once cycle complete: "
-        f"decisions={res['decisions']} orders={res['orders']} "
-        f"rejected={res['rejected']} equity_rows={res['equity_rows']}"
+        f"decisions={res['decisions']} signals={res['signals']} "
+        f"duplicates={res['duplicates']} rejected={res['rejected']}"
     )
     return 0
 
 
 def _build_components(args: argparse.Namespace, cfg, *, analyze_only: bool):
-    """Construct client, journal, and executor.
+    """Construct feed client, journal, signal engine and Telegram alerter.
 
-    Returns None and prints a clean error if MT5 can't be reached.
+    Returns None and prints a clean error if no market feed can be
+    reached.
     """
-    from app.executor import Executor
     from app.journal import Journal
+    from app.signals import SignalEngine
+    from app.telegram import TelegramAlerter
 
+    secrets = _resolve_secrets(args)
     try:
-        login, password, server, path = _resolve_creds(args)
-        client = MT5Client()
-        client.connect(login, password, server, path)
-        # ensure_demo at startup so we fail fast on a live account.
-        client.ensure_demo()
-    except Exception as exc:  # noqa: BLE001
-        print(f"MT5 not available: {exc}")
+        client, source = build_market_client(
+            cfg, secrets, feed_override=getattr(args, "feed", None))
+    except MarketDataError as exc:
+        print(f"no market feed available: {exc}")
         return None
 
     journal = Journal(Path(cfg.paths.data_dir) / "journal.db")
 
-    executor = None if analyze_only else Executor(client, journal, cfg)
+    telegram = None
+    if getattr(getattr(cfg, "signals", None), "telegram_enabled", True):
+        telegram = TelegramAlerter(
+            token=secrets.telegram_bot_token,
+            chat_id=secrets.telegram_chat_id,
+        )
+        if not telegram.enabled:
+            logger.warning(
+                "Telegram not configured (TELEGRAM_BOT_TOKEN / "
+                "TELEGRAM_CHAT_ID); signals will be journaled only"
+            )
+
+    engine = None if analyze_only else SignalEngine(
+        client, journal, cfg, telegram=telegram)
 
     components = {
         "cfg": cfg,
         "client": client,
+        "feed": source,
         "journal": journal,
-        "executor": executor,
+        "engine": engine,
+        "telegram": telegram,
         "analyze_only": analyze_only,
     }
     return components
@@ -218,25 +343,13 @@ def run_once(components: dict) -> dict:
     from app.scanner import scan_watchlist
 
     cfg = components["cfg"]
-    client = components["client"]
     journal = components["journal"]
-    executor = components["executor"]
+    engine = components["engine"]
     analyze_only = components["analyze_only"]
 
-    snapshots = scan_watchlist(client, cfg)
+    snapshots = scan_watchlist(components["client"], cfg)
 
-    # Equity snapshot for the cycle.
-    try:
-        info = client.account_info()
-        journal.record_equity(
-            balance=float(info.balance),
-            equity=float(info.equity),
-        )
-        equity_rows = 1
-    except Exception:  # noqa: BLE001
-        equity_rows = 0
-
-    decisions = rejected = orders = 0
+    decisions = signals = duplicates = rejected = 0
     from app import news as news_mod
 
     blackout = news_mod.current_blackout(cfg)
@@ -248,8 +361,6 @@ def run_once(components: dict) -> dict:
             blackout.time_utc.strftime("%H:%M"),
         )
     for snap in snapshots:
-        if not analyze_only and components.get("kill_switch", False):
-            break
         if blackout is not None:
             journal.record_decision(
                 symbol=snap.get("symbol", ""),
@@ -281,8 +392,8 @@ def run_once(components: dict) -> dict:
             continue
 
         decisions += 1
-        if analyze_only or executor is None:
-            # Just journal the decision without executing.
+        if analyze_only or engine is None:
+            # Just journal the decision without signaling.
             journal.record_decision(
                 symbol=decision.symbol,
                 action=decision.action,
@@ -296,60 +407,51 @@ def run_once(components: dict) -> dict:
             )
             continue
 
-        result = executor.execute(decision,
-                                  raw_llm_json=decision.model_dump_json())
-        if result.status == "rejected":
+        result = engine.process(decision,
+                                raw_llm_json=decision.model_dump_json())
+        if result.status == "signaled":
+            signals += 1
+        elif result.status == "duplicate":
+            duplicates += 1
+        elif result.status in ("rejected", "capped"):
             rejected += 1
-        elif result.status in ("filled", "closed", "modified"):
-            orders += 1
+        # "skipped" (no_trade) counts as neither.
 
-    # Position management: breakeven stop moves. Risk-reducing only, so it
-    # runs even during a news blackout. Skipped in analyze-only mode and
-    # when the kill switch is engaged.
-    if (not analyze_only and executor is not None
-            and not components.get("kill_switch", False)):
-        try:
-            from app.manage import breakeven_moves
-            for mdec in breakeven_moves(client.positions(), cfg):
-                mres = executor.execute(
-                    mdec, raw_llm_json=mdec.model_dump_json())
-                if mres.status == "modified":
-                    orders += 1
-        except Exception:  # noqa: BLE001
-            logger.exception("breakeven management step failed")
-
+    # NOTE: no breakeven step — signals-only has no open positions to
+    # manage. app.manage.breakeven_moves is retained (pure, tested) for
+    # a future execution mode, but the runner never calls it here.
     return {
         "decisions": decisions,
-        "orders": orders,
+        "signals": signals,
+        "duplicates": duplicates,
         "rejected": rejected,
-        "equity_rows": equity_rows,
     }
 
 
 def _cmd_analyze(args: argparse.Namespace) -> int:
-    """Decide + journal but NEVER order. ``--dry`` is the default behaviour."""
+    """Decide + print, NEVER journal, NEVER alert.
+
+    Falls back to an empty client when no feed is reachable, so the
+    rules engine can still be inspected offline.
+    """
     from app.brain import decide
     from app.risk import AccountState, RiskVerdict, check_decision
     from app.scanner import scan_watchlist
+    from app.signals import hypothetical_balance, size_signal
 
     cfg = load_config(args.config)
     if cfg is None:
         print("config not found")
         return 1
 
-    # Lazy MT5 client; tolerate "terminal not running" in analyze mode.
+    secrets = _resolve_secrets(args)
     try:
-        from app.mt5_client import MT5Error
-        login, password, server, path = _resolve_creds(args)
-        client = MT5Client()  # bound at module import, patchable in tests
-        try:
-            client.connect(login, password, server, path)
-        except MT5Error as exc:
-            print(f"MT5 not available, using empty data: {exc}")
-            client = _NoopMT5Client()
-    except ImportError:
-        print("MetaTrader5 not installed, using empty data")
-        client = _NoopMT5Client()
+        client, source = build_market_client(
+            cfg, secrets, feed_override=getattr(args, "feed", None))
+        print(f"feed: {source}")
+    except MarketDataError as exc:
+        print(f"no market feed available ({exc}); using empty data")
+        client = _EmptyClient()
 
     try:
         snapshots = scan_watchlist(client, cfg)
@@ -359,12 +461,12 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         except Exception:  # noqa: BLE001
             pass
 
-    starting_balance = float(getattr(getattr(client, "_last_account", None), "balance", 0.0) or 0.0)
+    balance = hypothetical_balance(cfg)
     kill_path = Path(cfg.paths.kill_switch_path)
     account_state = AccountState(
-        balance=starting_balance,
-        equity=starting_balance,
-        starting_balance_today=starting_balance,
+        balance=balance,
+        equity=balance,
+        starting_balance_today=balance,
         trade_mode=cfg.mode,
         kill_switch_engaged=kill_path.exists(),
     )
@@ -388,37 +490,59 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         verdict: RiskVerdict = check_decision(
             decision, account_state, [], [], cfg
         )
+        extra = ""
+        if decision.action == "propose" and verdict.approved:
+            try:
+                lots, risk_usd, per_dollar = size_signal(cfg, client, decision)
+                extra = (f" sizing: {lots:.2f} lots, risk ${risk_usd:.2f}, "
+                         f"${per_dollar:.2f} per $1 move (paper ${balance:,.0f})")
+            except ValueError as exc:
+                extra = f" sizing failed: {exc}"
         print(
             f"[{snap.get('symbol')}] action={decision.action} "
             f"approved={verdict.approved} "
             f"reasons={verdict.reasons} "
             f"playbook={decision.playbook!r} "
             f"confidence={decision.confidence:.2f} "
-            f"reasoning={decision.reasoning[:80]!r}"
+            f"reasoning={decision.reasoning[:80]!r}{extra}"
         )
     return 0
 
 
-class _NoopMT5Client:
-    """Fallback when MT5 is unavailable: returns empty data, no positions."""
+class _EmptyClient:
+    """Fallback when no feed is reachable: empty data, no positions."""
 
-    def __init__(self):
-        self._last_account = None
+    name = "empty"
 
-    def account_info(self):  # pragma: no cover - trivial
+    def connect(self):
         return None
 
-    def copy_rates(self, symbol, tf, count):
-        return []
-
-    def symbol_tick(self, symbol):  # pragma: no cover - trivial
+    def shutdown(self):
         return None
+
+    def copy_rates(self, symbol, timeframe, count):
+        return Rates(rates=[])
+
+    def symbol_tick(self, symbol):
+        return None
+
+    def symbol_info(self, symbol):
+        from app.market_data import XAUUSD_SPEC
+        return XAUUSD_SPEC
+
+    def select_symbol(self, symbol):
+        return True
 
     def positions(self, symbol=None):
         return []
 
-    def shutdown(self):
-        return None
+    def account_info(self):
+        from app.market_data import PaperAccountInfo
+        return PaperAccountInfo(balance=0.0, equity=0.0)
+
+    def feed_status(self):
+        return {"name": self.name, "connected": False,
+                "last_tick_epoch": None, "last_error": "no feed"}
 
 
 def _cmd_review(args: argparse.Namespace) -> int:
@@ -454,7 +578,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
 def _cmd_backtest(args: argparse.Namespace) -> int:
     """Paper backtest of the rules engine on historical CSV candles.
 
-    No MT5, no network. Replays closed candles through
+    No feed, no network. Replays closed candles through
     scanner -> strategy -> risk with paper sizing.
     """
     from app.backtest import run_backtest
@@ -482,14 +606,13 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     """Pre-flight self-check against the *real* environment.
 
     Verifies, in order:
-      1. the ``MetaTrader5`` package can be imported,
-      2. the terminal can be reached and credentials resolve (CLI -> .env),
-      3. the account is a DEMO account (safety invariant),
-      4. every configured symbol is present / selectable and serves live
-         rates + ticks (``doctor`` suggests broker-suffix matches when a
-         configured name is absent),
-      5. the rules engine passes a self-test,
-      6. the kill switch is off.
+      1. OANDA credentials are configured (warn only — Deriv covers it),
+      2. a market feed connects (OANDA, else Deriv),
+      3. every configured symbol serves live rates + ticks,
+      4. the rules engine passes a self-test,
+      5. the news calendar feed (fail-open: warn only),
+      6. the Telegram token validates via getMe (warn only),
+      7. the kill switch is off.
 
     Returns 0 only when no check FAILs (warnings are non-fatal).
     """
@@ -499,69 +622,44 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     def add(name: str, status: str, detail: str = "") -> None:
         checks.append((name, status, detail))
 
-    # 1. MetaTrader5 package import (lazy so tests swap in a fake via _mt5).
-    try:
-        from app.mt5_client import MT5Client, LiveAccountError, _get_mt5
-        _get_mt5()
-        add("MetaTrader5 package import", "ok", "")
-    except ImportError as exc:
-        add("MetaTrader5 package import", "fail", str(exc))
-        _print_checks(checks)
-        print("\nInstall with: .venv\\Scripts\\pip install MetaTrader5")
-        return 1
+    secrets = _resolve_secrets(args)
 
-    # 2. Terminal + login (credentials resolved from CLI, then .env).
-    login, password, server, path = _resolve_creds(args)
-    client = MT5Client()
+    # 1. OANDA credentials (warn only — Deriv is the fallback).
+    if secrets.oanda_api_token and secrets.oanda_account_id:
+        add("OANDA credentials", "ok", "token + account id configured")
+    else:
+        add("OANDA credentials", "warn",
+            "not set — Deriv fallback will be used (OANDA is the main feed)")
+
+    # 2. Feed connect.
+    client = None
     try:
-        client.connect(login, password, server, path)
-        add("MT5 terminal connect", "ok",
-            f"login={login} server={server} path={path or '<default>'}")
-    except Exception as exc:  # noqa: BLE001
-        add("MT5 terminal connect", "fail", f"{type(exc).__name__}: {exc}")
+        client, source = build_market_client(
+            cfg, secrets, feed_override=getattr(args, "feed", None))
+        add("market feed", "ok", f"connected via {source}")
+    except MarketDataError as exc:
+        add("market feed", "fail", str(exc))
         _print_checks(checks)
         return 1
 
-    # 3. Demo-account assertion (safety invariant #2).
-    try:
-        info = client.account_info()
-        client.ensure_demo()
-        add("demo account", "ok",
-            f"login={info.login} mode={info.trade_mode} "
-            f"balance={info.balance:.2f} equity={info.equity:.2f}")
-    except LiveAccountError as exc:
-        add("demo account", "fail", f"non-demo account: {exc}")
-    except Exception as exc:  # noqa: BLE001
-        add("demo account", "fail", f"{type(exc).__name__}: {exc}")
-
-    # 4. Per-symbol health with broker-suffix suggestion.
-    available = set(client.symbol_names())
+    # 3. Per-symbol live data.
     primary_tf = cfg.timeframes[0] if cfg.timeframes else "M15"
     for symbol in cfg.symbols:
-        actual = symbol
-        if symbol not in available:
-            candidates = [n for n in available if n.startswith(symbol) and n != symbol]
-            if candidates:
-                add(f"symbol {symbol}", "warn",
-                    "not found; possible broker-suffix matches: "
-                    + ", ".join(candidates[:5]))
-                actual = candidates[0]
-            else:
-                add(f"symbol {symbol}", "fail", "not present in terminal")
-                continue
         try:
-            client.select_symbol(actual)
-        except Exception as exc:  # noqa: BLE001
-            add(f"symbol {symbol} Market Watch", "warn", str(exc))
-        try:
-            client.copy_rates(actual, primary_tf, 5)
-            client.symbol_tick(actual)
-            add(f"symbol {symbol} live data", "ok", actual)
+            rates = client.copy_rates(symbol, primary_tf, 5)
+            bars = rates.rates if isinstance(rates, Rates) else list(rates)
+            tick = client.symbol_tick(symbol)
+            if not bars:
+                raise MarketDataError("no candles returned")
+            if tick is None:
+                raise MarketDataError("no tick returned")
+            add(f"symbol {symbol} live data", "ok",
+                f"{len(bars)} {primary_tf} bars, tick {tick.bid:.2f}/{tick.ask:.2f}")
         except Exception as exc:  # noqa: BLE001
             add(f"symbol {symbol} live data", "fail",
                 f"{type(exc).__name__}: {exc}")
 
-    # 5. Rules engine self-test: a synthetic snapshot must decide cleanly.
+    # 4. Rules engine self-test: a synthetic snapshot must decide cleanly.
     try:
         from app.strategy import decide
         probe = decide({"symbol": "XAUUSD", "timeframes": {}}, cfg)
@@ -570,7 +668,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     except Exception as exc:  # noqa: BLE001
         add("rules engine", "fail", f"{type(exc).__name__}: {exc}")
 
-    # 6. News calendar feed (fail-open: warn only, never fail).
+    # 5. News calendar feed (fail-open: warn only, never fail).
     try:
         from app import news as news_mod
 
@@ -589,6 +687,24 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     except Exception as exc:  # noqa: BLE001
         add("news calendar", "warn", f"feed unreachable, fail-open: {exc}")
 
+    # 6. Telegram token validation (getMe — sends no message).
+    try:
+        from app.telegram import TelegramAlerter
+
+        alerter = TelegramAlerter(
+            token=secrets.telegram_bot_token,
+            chat_id=secrets.telegram_chat_id,
+        )
+        if not alerter.enabled:
+            add("Telegram alerts", "warn",
+                "not configured — signals will be journaled only")
+        else:
+            ok, detail = alerter.validate_token()
+            add("Telegram alerts", "ok" if ok else "warn",
+                f"bot {detail}" if ok else f"token invalid: {detail}")
+    except Exception as exc:  # noqa: BLE001
+        add("Telegram alerts", "warn", f"check failed: {exc}")
+
     # 7. Kill switch.
     ks = Path(cfg.paths.kill_switch_path)
     if ks.exists():
@@ -606,50 +722,49 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+def _add_feed_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--feed", default=None, choices=["auto", "oanda", "deriv"],
+        help="market feed: auto (default), oanda, or deriv",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="trader")
     parser.add_argument("--config", default="config.yaml", help="path to config.yaml")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_status = sub.add_parser("status", help="show MT5 connection & account")
-    p_status.add_argument("--login", type=int, default=0)
-    p_status.add_argument("--password", default="")
-    p_status.add_argument("--server", default="")
-    p_status.add_argument("--path", default="")
+    p_status = sub.add_parser("status", help="show feed connection & latest tick")
+    _add_feed_arg(p_status)
     p_status.set_defaults(func=_cmd_status)
 
     sub.add_parser("kill", help="engage kill switch").set_defaults(func=_cmd_kill)
     sub.add_parser("resume", help="release kill switch").set_defaults(func=_cmd_resume)
 
-    p_run = sub.add_parser("run", help="continuous trading loop")
-    p_run.add_argument("--login", type=int, default=0)
-    p_run.add_argument("--password", default="")
-    p_run.add_argument("--server", default="")
-    p_run.add_argument("--path", default="")
+    p_run = sub.add_parser("run", help="continuous scan loop (local)")
+    _add_feed_arg(p_run)
     p_run.set_defaults(func=_cmd_run)
+
+    p_serve = sub.add_parser(
+        "serve", help="scan loop + dashboard web server on $PORT (Render)")
+    _add_feed_arg(p_serve)
+    p_serve.set_defaults(func=_cmd_serve)
+
     p_once = sub.add_parser("once", help="single cycle")
     p_once.add_argument("--analyze", action="store_true",
-                        help="single cycle in propose-only mode (no orders)")
-    p_once.add_argument("--login", type=int, default=0)
-    p_once.add_argument("--password", default="")
-    p_once.add_argument("--server", default="")
-    p_once.add_argument("--path", default="")
+                        help="single cycle in propose-only mode (no alerts)")
+    _add_feed_arg(p_once)
     p_once.set_defaults(func=_cmd_once)
-    p_analyze = sub.add_parser("analyze", help="analyze only, no orders")
+
+    p_analyze = sub.add_parser("analyze", help="analyze only, no journal, no alerts")
     p_analyze.add_argument("--dry", action="store_true",
-                            help="alias for the default no-orders behavior")
-    p_analyze.add_argument("--login", type=int, default=0)
-    p_analyze.add_argument("--password", default="")
-    p_analyze.add_argument("--server", default="")
-    p_analyze.add_argument("--path", default="")
+                            help="alias for the default no-journal behavior")
+    _add_feed_arg(p_analyze)
     p_analyze.set_defaults(func=_cmd_analyze)
 
     p_doctor = sub.add_parser(
-        "doctor", help="pre-flight self-check of MT5 + rules engine + kill switch")
-    p_doctor.add_argument("--login", type=int, default=0)
-    p_doctor.add_argument("--password", default="")
-    p_doctor.add_argument("--server", default="")
-    p_doctor.add_argument("--path", default="")
+        "doctor", help="pre-flight self-check of feed + rules engine + Telegram")
+    _add_feed_arg(p_doctor)
     p_doctor.set_defaults(func=_cmd_doctor)
 
     p_review = sub.add_parser("review", help="generate daily review report")
@@ -659,7 +774,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_backtest = sub.add_parser(
         "backtest",
-        help="paper backtest of the rules engine on CSV candles (no MT5)")
+        help="paper backtest of the rules engine on CSV candles (no feed)")
     p_backtest.add_argument("--symbol", default="XAUUSD",
                             help="symbol label for the CSV data")
     p_backtest.add_argument("--timeframe", default="M15",

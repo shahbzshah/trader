@@ -1,9 +1,11 @@
-"""End-to-end test of `python -m app.main once` with a mocked MT5.
+"""End-to-end test of `python -m app.main once` with a fake feed.
 
-Exercises the M4 acceptance criterion: a full --once cycle on a mocked
-environment must write decision + order rows. Decisions now come from the
-deterministic rules engine (no LLM); the fake MT5 serves hand-crafted
-candles that either trigger the sweep+FVG setup or not.
+Exercises the signals-only acceptance criterion: a full --once cycle on
+a mocked environment must write decision rows and journal a signal for
+a setup — and must NEVER write an order row (there is no execution).
+Decisions come from the deterministic rules engine (no LLM); the fake
+feed serves hand-crafted candles that either trigger the sweep+FVG
+setup or not.
 """
 
 from __future__ import annotations
@@ -12,37 +14,14 @@ from pathlib import Path
 
 import pytest
 
-from tests.fake_mt5 import (
-    FakeRatesRow,
-    FakeSymbolInfo,
-    FakeTick,
-    make_fake,
-)
-
-# Timeframe constants mirror the real MT5 module (see tests/fake_mt5.py).
-TF_M15 = 15
-TF_H1 = 16385
+from app.market_data import Tick
+from tests.fake_client import FakeClient, rates_from_rows
 
 # t0 values chosen so the LAST bar lands inside the 08:00-20:00 UTC session
-# on a weekday: last bar = 2023-11-15 12:00 UTC (Wednesday).
+# on a weekday: last bar = 2023-11-15 12:00 UTC (Wednesday), inside the
+# 12:00-15:00 UTC New York kill zone.
 T0_M15 = 1700049600 - 104 * 900
 T0_H1 = 1700049600 - 72 * 3600
-
-
-def _install_fake_mt5(fake) -> None:
-    import app.mt5_client as client_module
-    client_module._mt5 = fake
-
-
-def _to_rates(rows, t0, step):
-    return [
-        FakeRatesRow(
-            time=t0 + i * step,
-            open=o, high=h, low=l, close=c,
-            tick_volume=100, spread=5, real_volume=0,
-        )
-        for i, (o, h, l, c) in enumerate(rows)
-    ]
 
 
 def _flat_rows(n, price=1.1000, point=0.0001):
@@ -82,45 +61,50 @@ def _uptrend_h1_rows():
 
 def _setup_fake_with_setup(fake):
     """Serve setup-triggering candles: M15 sweep+FVG, H1 uptrend."""
-    fake.rates_by_tf[TF_M15] = _to_rates(_bullish_m15_rows(), T0_M15, 900)
-    fake.rates_by_tf[TF_H1] = _to_rates(_uptrend_h1_rows(), T0_H1, 3600)
+    fake.rates_by_tf[("XAUUSD", "M15")] = rates_from_rows(
+        _bullish_m15_rows(), T0_M15, 900, spread=5)
+    fake.rates_by_tf[("XAUUSD", "H1")] = rates_from_rows(
+        _uptrend_h1_rows(), T0_H1, 3600, spread=5)
+    # Tick at the current price (last close 1.1045) so the buy-limit
+    # entry (~1.103) sits below the ask, as a real limit would.
+    fake.tick = Tick(bid=1.1044, ask=1.1045, spread=10.0, time=T0_M15 + 104 * 900)
 
 
 def _base_fake():
-    fake = make_fake()
-    fake.symbol_data["EURUSD"] = FakeSymbolInfo(name="EURUSD")
-    fake.symbol_data["GBPUSD"] = FakeSymbolInfo(name="GBPUSD")
-    fake.symbol_data["XAUUSD"] = FakeSymbolInfo(name="XAUUSD", point=0.01,
-                                               digits=2, volume_step=0.01,
-                                               trade_contract_size=100.0)
-    fake.tick_data["EURUSD"] = FakeTick(bid=1.1, ask=1.1001, time=1)
-    fake.tick_data["GBPUSD"] = FakeTick(bid=1.25, ask=1.2501, time=1)
-    fake.tick_data["XAUUSD"] = FakeTick(bid=1900.0, ask=1900.1, time=1)
+    fake = FakeClient()
+    fake.tick = Tick(bid=1.1000, ask=1.1001, spread=10.0, time=1)
     return fake
 
 
-def _run_once_main(tmp_path, monkeypatch, cfg):
+def _run_once_main(tmp_path, monkeypatch, cfg, fake):
     from app import main as main_module
     monkeypatch.setattr(main_module, "load_config", lambda *a, **k: cfg)
-    rc = main_module.main([
-        "--config", "config.yaml", "once",
-        "--login", "12345", "--password", "pw", "--server", "x",
-    ])
+    monkeypatch.setattr(
+        main_module, "build_market_client", lambda *a, **k: (fake, "fake"))
+    rc = main_module.main(["--config", "config.yaml", "once"])
     assert rc == 0
 
 
-def test_once_cycle_writes_decision_and_no_order_for_no_trade(tmp_path, monkeypatch):
+def _load_cfg(tmp_path):
     from app.config import load_config
 
     cfg = load_config("config.yaml", env_path=tmp_path / ".env")
     cfg.paths.data_dir = str(tmp_path)
     cfg.paths.kill_switch_path = str(tmp_path / "KILL_SWITCH")
+    return cfg
+
+
+def test_once_cycle_writes_decision_and_no_order_for_no_trade(
+        tmp_path, monkeypatch, capsys):
+    cfg = _load_cfg(tmp_path)
 
     # Flat market: no sweep, no bias -> the rules engine says no_trade.
     fake = _base_fake()
-    fake.rates_data = _to_rates(_flat_rows(250), T0_M15, 900)
-    _install_fake_mt5(fake)
-    _run_once_main(tmp_path, monkeypatch, cfg)
+    fake.rates_by_tf[("XAUUSD", "M15")] = rates_from_rows(
+        _flat_rows(250), T0_M15, 900, spread=5)
+    fake.rates_by_tf[("XAUUSD", "H1")] = rates_from_rows(
+        _flat_rows(72), T0_H1, 3600, spread=5)
+    _run_once_main(tmp_path, monkeypatch, cfg, fake)
 
     from app.journal import Journal
     j = Journal(Path(cfg.paths.data_dir) / "journal.db")
@@ -128,21 +112,19 @@ def test_once_cycle_writes_decision_and_no_order_for_no_trade(tmp_path, monkeypa
     assert len(decs) >= 1
     assert all(d["action"] == "no_trade" for d in decs)
     assert all(d["approved"] for d in decs)
+    # Signals-only: the orders table must stay empty.
     assert j.list_orders(limit=20) == []
-    assert len(j.list_equity(limit=5)) == 1
+    out = capsys.readouterr().out
+    assert "signals=0" in out
 
 
-def test_once_cycle_propose_writes_decision_and_order(tmp_path, monkeypatch):
-    from app.config import load_config
-
-    cfg = load_config("config.yaml", env_path=tmp_path / ".env")
-    cfg.paths.data_dir = str(tmp_path)
-    cfg.paths.kill_switch_path = str(tmp_path / "KILL_SWITCH")
+def test_once_cycle_propose_writes_decision_and_signal_no_order(
+        tmp_path, monkeypatch, capsys):
+    cfg = _load_cfg(tmp_path)
 
     fake = _base_fake()
     _setup_fake_with_setup(fake)
-    _install_fake_mt5(fake)
-    _run_once_main(tmp_path, monkeypatch, cfg)
+    _run_once_main(tmp_path, monkeypatch, cfg, fake)
 
     from app.journal import Journal
     j = Journal(Path(cfg.paths.data_dir) / "journal.db")
@@ -150,31 +132,25 @@ def test_once_cycle_propose_writes_decision_and_order(tmp_path, monkeypatch):
     orders = j.list_orders(limit=20)
 
     propose_decs = [d for d in decs if d["action"] == "propose"]
-    # The sweep+FVG strategy emits entry_type="limit", so the live executor
-    # places a pending order (status "pending"), never a market fill.
-    pending = [o for o in orders if o["status"] == "pending"]
     assert len(propose_decs) >= 1
-    assert len(pending) >= 1
-    assert pending[0]["decision_id"] in {d["id"] for d in propose_decs}
     assert propose_decs[0]["playbook"] == "sweep_fvg_reclaim"
+    assert all(d["approved"] for d in propose_decs)
+    # No order rows are ever written in signals-only mode.
+    assert orders == []
+    out = capsys.readouterr().out
+    assert "signals=1" in out
 
 
 def test_once_cycle_kill_switch_blocks(tmp_path, monkeypatch):
-    from app.config import load_config
-
-    cfg = load_config("config.yaml", env_path=tmp_path / ".env")
-    cfg.paths.data_dir = str(tmp_path)
-    cfg.paths.kill_switch_path = str(tmp_path / "KILL_SWITCH")
+    cfg = _load_cfg(tmp_path)
     Path(cfg.paths.kill_switch_path).touch()
 
     fake = _base_fake()
     _setup_fake_with_setup(fake)
-    _install_fake_mt5(fake)
-    _run_once_main(tmp_path, monkeypatch, cfg)
+    _run_once_main(tmp_path, monkeypatch, cfg, fake)
 
     from app.journal import Journal
     j = Journal(Path(cfg.paths.data_dir) / "journal.db")
-    orders = j.list_orders(limit=20)
-    assert all(o["status"] != "filled" for o in orders)
+    assert j.list_orders(limit=20) == []
     decs = j.list_decisions(limit=20)
     assert any("kill_switch_engaged" in d["reject_reasons"] for d in decs)

@@ -52,6 +52,20 @@ class RiskConfig(BaseModel):
     breakeven_at_r: float = Field(default=1.0, ge=0.1, le=10.0)
 
 
+class SignalsConfig(BaseModel):
+    """Signals-only operation (no MT5, no trade execution)."""
+
+    # Hypothetical account balance every signal is sized against
+    # (lots = risk$ / (SL$ x 100) for gold). No real money anywhere.
+    hypothetical_balance_usd: float = Field(default=10000.0, ge=0.0)
+    # Which feed to use: "oanda" (main), "deriv" (fallback), "auto"
+    # (OANDA when its credentials are present and the probe succeeds,
+    # otherwise Deriv).
+    feed: Literal["auto", "oanda", "deriv"] = "auto"
+    telegram_enabled: bool = True
+    max_signals_per_day: int = Field(default=5, ge=0)
+
+
 class DashboardConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = Field(default=8765, ge=1, le=65535)
@@ -91,6 +105,7 @@ class AppConfig(BaseModel):
     kill_zones: list[str] = Field(default_factory=list)
     risk: RiskConfig = RiskConfig()
     news: NewsConfig = NewsConfig()
+    signals: SignalsConfig = SignalsConfig()
     dashboard: DashboardConfig = DashboardConfig()
     paths: PathsConfig = PathsConfig()
 
@@ -121,30 +136,31 @@ class AppConfig(BaseModel):
 
 
 class EnvSecrets(BaseModel):
-    """Secrets that must come from .env, never config.yaml."""
+    """Secrets that must come from .env, never config.yaml.
 
-    mt5_login: int = 0
-    mt5_password: str = ""
-    mt5_server: str = ""
-    mt5_path: str = ""
+    OANDA v20 Practice (main feed) + Telegram (alerts). No MT5
+    credentials exist in the signals-only bot.
+    """
+
+    oanda_api_token: str = ""
+    oanda_account_id: str = ""
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
 
     @classmethod
     def from_env(cls, env_path: Path | None) -> "EnvSecrets":
         env: dict[str, str | None] = {}
         if env_path is not None and env_path.exists():
             env = {k: v for k, v in dotenv_values(env_path).items() if v is not None}
-        for k in ("MT5_LOGIN", "MT5_PASSWORD", "MT5_SERVER", "MT5_PATH"):
+        for k in ("OANDA_API_TOKEN", "OANDA_ACCOUNT_ID",
+                  "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
             if k not in env and os.environ.get(k) is not None:
                 env[k] = os.environ.get(k)
-        try:
-            login = int(env.get("MT5_LOGIN") or 0)
-        except ValueError:
-            login = 0
         return cls(
-            mt5_login=login,
-            mt5_password=env.get("MT5_PASSWORD", "") or "",
-            mt5_server=env.get("MT5_SERVER", "") or "",
-            mt5_path=env.get("MT5_PATH", "") or "",
+            oanda_api_token=env.get("OANDA_API_TOKEN", "") or "",
+            oanda_account_id=env.get("OANDA_ACCOUNT_ID", "") or "",
+            telegram_bot_token=env.get("TELEGRAM_BOT_TOKEN", "") or "",
+            telegram_chat_id=env.get("TELEGRAM_CHAT_ID", "") or "",
         )
 
 
@@ -156,9 +172,9 @@ def load_config(
 ) -> AppConfig:
     """Load and validate configuration from YAML and .env.
 
-    Secrets (MT5 creds) are read from .env / process env. The ``mode`` is
-    asserted to be ``demo`` per the safety invariant. Unknown config keys
-    (e.g. a legacy ``llm:`` section) are ignored.
+    Secrets (OANDA + Telegram) are read from .env / process env. The
+    ``mode`` is asserted to be ``demo`` per the safety invariant.
+    Unknown config keys (e.g. a legacy ``llm:`` section) are ignored.
     """
     config_path = Path(config_path)
     if base_dir is not None:
@@ -187,5 +203,6 @@ __all__ = [
     "RiskConfig",
     "ScheduleConfig",
     "SessionHoursConfig",
+    "SignalsConfig",
     "load_config",
 ]

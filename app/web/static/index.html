@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Trader Dashboard</title>
+<title>Gold Signals — XAUUSD</title>
 <style>
   :root {
     --bg: #0e1116;
@@ -49,7 +49,7 @@
   .kill-banner.active { display: block; }
   main {
     display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
-    padding: 20px;
+    padding: 20px; max-width: 1100px; margin: 0 auto;
   }
   @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
   .card {
@@ -58,6 +58,7 @@
   }
   .card h2 { margin: 0 0 12px 0; font-size: 13px; text-transform: uppercase;
               letter-spacing: 0.5px; color: var(--muted); }
+  .wide { grid-column: 1 / -1; }
   .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 24px; }
   .kv { display: flex; justify-content: space-between; padding: 4px 0;
         border-bottom: 1px dashed #21272e; }
@@ -66,35 +67,33 @@
   .kv .v { font-variant-numeric: tabular-nums; }
   .pill { display: inline-block; padding: 2px 8px; border-radius: 999px;
           font-size: 11px; font-weight: 600; }
-  .pill.demo { background: #1f3a52; color: var(--accent); }
-  .pill.real { background: #4a2a2a; color: var(--red); }
   .pill.live { background: #1a3a1d; color: var(--green); }
   .pill.dead { background: #3a3a3a; color: var(--muted); }
   .pill.kill { background: var(--red); color: white; }
+  .pill.buy { background: #1a3a1d; color: var(--green); }
+  .pill.sell { background: #4a2a2a; color: var(--red); }
   table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
   th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 500; font-size: 11px;
         text-transform: uppercase; letter-spacing: 0.5px; }
   td.num { text-align: right; }
   tr.disapproved td { color: var(--muted); }
-  .pos { color: var(--green); }
-  .neg { color: var(--red); }
-  .chart-wrap { position: relative; width: 100%; height: 240px; }
-  canvas { width: 100%; height: 100%; display: block; }
-  footer { padding: 12px 20px; color: var(--muted); font-size: 11px;
-           text-align: center; border-top: 1px solid var(--border); }
   .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
   .links a { color: var(--accent); text-decoration: none; margin-right: 12px; }
   .links a:hover { text-decoration: underline; }
+  footer { padding: 12px 20px; color: var(--muted); font-size: 11px;
+           text-align: center; border-top: 1px solid var(--border); }
+  .signal-big { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
+  .signal-big .buy { color: var(--green); }
+  .signal-big .sell { color: var(--red); }
 </style>
 </head>
 <body>
 <header>
   <div>
-    <h1>Trader Dashboard</h1>
+    <h1>Gold Signals — XAUUSD</h1>
     <span class="meta" id="ts">—</span>
-    <span class="meta" id="mode"></span>
-    <span class="meta" id="mt5"></span>
+    <span class="meta" id="feed-pill"></span>
   </div>
   <div class="toolbar">
     <button id="refresh" type="button">Refresh</button>
@@ -102,41 +101,37 @@
     <button id="kill" class="danger" type="button">Kill Switch</button>
   </div>
 </header>
-<div id="banner" class="kill-banner">⛔ KILL SWITCH ENGAGED — NO NEW ORDERS</div>
+<div id="banner" class="kill-banner">KILL SWITCH ENGAGED — NO NEW SIGNALS</div>
 <main>
-  <section class="card" id="account">
-    <h2>Account</h2>
-    <div id="account-content"><div class="empty">Loading…</div></div>
+  <section class="card" id="feed">
+    <h2>Feed</h2>
+    <div id="feed-content"><div class="empty">Loading…</div></div>
   </section>
   <section class="card" id="today">
     <h2>Today</h2>
     <div id="today-content"><div class="empty">Loading…</div></div>
   </section>
-  <section class="card" id="positions">
-    <h2>Open Positions</h2>
-    <div id="positions-content"><div class="empty">Loading…</div></div>
+  <section class="card wide" id="last-signal">
+    <h2>Last Signal</h2>
+    <div id="last-signal-content"><div class="empty">No signal yet.</div></div>
   </section>
-  <section class="card" id="decisions">
+  <section class="card wide" id="signals">
+    <h2>Signals</h2>
+    <div id="signals-content"><div class="empty">Loading…</div></div>
+    <div class="links" style="margin-top: 8px;">
+      <a href="/health" target="_blank">/health</a>
+      <a href="/api/state" target="_blank">/api/state</a>
+      <a href="/api/signals" target="_blank">/api/signals</a>
+      <a href="/api/decisions" target="_blank">/api/decisions</a>
+    </div>
+  </section>
+  <section class="card wide" id="decisions">
     <h2>Recent Decisions</h2>
     <div id="decisions-content"><div class="empty">Loading…</div></div>
   </section>
-  <section class="card" id="equity" style="grid-column: 1 / -1;">
-    <h2>Equity (last 7 days)</h2>
-    <div class="chart-wrap"><canvas id="equity-canvas"></canvas></div>
-  </section>
-  <section class="card" id="orders" style="grid-column: 1 / -1;">
-    <h2>Recent Orders</h2>
-    <div id="orders-content"><div class="empty">Loading…</div></div>
-    <div class="links" style="margin-top: 8px;">
-      <a href="/api/state" target="_blank">/api/state</a>
-      <a href="/api/decisions" target="_blank">/api/decisions</a>
-      <a href="/api/equity" target="_blank">/api/equity</a>
-      <a href="/api/orders" target="_blank">/api/orders</a>
-    </div>
-  </section>
 </main>
 <footer>
-  <span>Auto-refresh every 10s · demo account only · built for personal trading</span>
+  <span>Signals only — no trades are placed by this bot · Auto-refresh every 10s</span>
 </footer>
 <script>
 const REFRESH_MS = 10000;
@@ -148,7 +143,12 @@ const ts = (s) => {
   const d = new Date(s * 1000);
   return d.toLocaleString();
 };
-const cls = (n) => (n > 0 ? "pos" : (n < 0 ? "neg" : ""));
+const ageLabel = (secs) => {
+  if (secs === null || secs === undefined) return "—";
+  if (secs < 60) return secs + "s ago";
+  if (secs < 3600) return Math.floor(secs / 60) + "m ago";
+  return Math.floor(secs / 3600) + "h ago";
+};
 
 async function getJSON(url) {
   const r = await fetch(url, { cache: "no-store" });
@@ -161,72 +161,85 @@ async function postJSON(url) {
   return await r.json();
 }
 
-function renderAccount(acc, kill, mt5) {
+function renderFeed(feed) {
   document.getElementById("ts").textContent = new Date().toLocaleString();
-  const pill = document.getElementById("mt5");
-  pill.innerHTML = mt5
-    ? '<span class="pill live">MT5 live</span>'
-    : '<span class="pill dead">MT5 offline</span>';
-  const banner = document.getElementById("banner");
-  banner.classList.toggle("active", !!kill);
-  if (!acc) {
-    document.getElementById("account-content").innerHTML =
-      '<div class="empty">MT5 terminal not running. Open MetaTrader 5 and refresh.</div>';
-    document.getElementById("mode").innerHTML = "";
-    return;
-  }
-  const modePill = acc.trade_mode === "demo"
-    ? '<span class="pill demo">demo</span>'
-    : '<span class="pill real">real</span>';
-  document.getElementById("mode").innerHTML = modePill;
+  const pill = document.getElementById("feed-pill");
+  pill.innerHTML = feed.feed_ok
+    ? `<span class="pill live">feed ${feed.name || "?"} live</span>`
+    : `<span class="pill dead">feed ${feed.name || "?"} down</span>`;
   const html = `
     <div class="grid-2">
-      <div class="kv"><span class="k">Login</span><span class="v">${acc.login}</span></div>
-      <div class="kv"><span class="k">Server</span><span class="v">${acc.server}</span></div>
-      <div class="kv"><span class="k">Currency</span><span class="v">${acc.currency}</span></div>
-      <div class="kv"><span class="k">Leverage</span><span class="v">1:${acc.leverage}</span></div>
-      <div class="kv"><span class="k">Balance</span><span class="v">${fmt(acc.balance)}</span></div>
-      <div class="kv"><span class="k">Equity</span><span class="v">${fmt(acc.equity)}</span></div>
-      <div class="kv"><span class="k">Margin</span><span class="v">${fmt(acc.margin)}</span></div>
-      <div class="kv"><span class="k">Free margin</span><span class="v">${fmt(acc.free_margin)}</span></div>
-    </div>`;
-  document.getElementById("account-content").innerHTML = html;
+      <div class="kv"><span class="k">Source</span><span class="v">${feed.name || "—"}</span></div>
+      <div class="kv"><span class="k">Status</span><span class="v">${feed.feed_ok ? "OK" : "DOWN"}</span></div>
+      <div class="kv"><span class="k">Last tick</span><span class="v">${ageLabel(feed.last_tick_age_s)}</span></div>
+      <div class="kv"><span class="k">Ticks seen</span><span class="v">${fmtInt(feed.tick_count)}</span></div>
+    </div>
+    ${feed.last_error ? `<div style="color: var(--orange); margin-top: 8px; font-size: 12px;">${feed.last_error}</div>` : ""}`;
+  document.getElementById("feed-content").innerHTML = html;
 }
 
 function renderToday(today) {
   const html = `
     <div class="grid-2">
       <div class="kv"><span class="k">Decisions</span><span class="v">${fmtInt(today.decision_count)}</span></div>
-      <div class="kv"><span class="k">Approved</span><span class="v pos">${fmtInt(today.approved)}</span></div>
-      <div class="kv"><span class="k">Rejected</span><span class="v neg">${fmtInt(today.rejected)}</span></div>
+      <div class="kv"><span class="k">Signals sent</span><span class="v">${fmtInt(today.signals)}</span></div>
+      <div class="kv"><span class="k">Approved</span><span class="v">${fmtInt(today.approved)}</span></div>
+      <div class="kv"><span class="k">Rejected</span><span class="v">${fmtInt(today.rejected)}</span></div>
     </div>`;
   document.getElementById("today-content").innerHTML = html;
 }
 
-function renderPositions(positions) {
-  if (!positions || !positions.length) {
-    document.getElementById("positions-content").innerHTML = '<div class="empty">No open positions.</div>';
+function signalHeadline(s) {
+  const dir = (s.direction || "").toLowerCase();
+  const cls = dir === "buy" ? "buy" : "sell";
+  const label = dir === "buy" ? "BUY" : "SELL";
+  return `<div class="signal-big"><span class="${cls}">${label}</span> ${s.symbol || ""} @ ${fmt(s.entry)}</div>`;
+}
+
+function renderLastSignal(last) {
+  if (!last) {
+    document.getElementById("last-signal-content").innerHTML = '<div class="empty">No signal yet.</div>';
     return;
   }
-  const rows = positions.map(p => {
-    const clsP = cls(p.profit);
+  document.getElementById("last-signal-content").innerHTML = `
+    ${signalHeadline(last)}
+    <div class="grid-2">
+      <div class="kv"><span class="k">Stop loss</span><span class="v">${fmt(last.stop_loss)}</span></div>
+      <div class="kv"><span class="k">Take profit</span><span class="v">${fmt(last.take_profit)}</span></div>
+      <div class="kv"><span class="k">Risk</span><span class="v">${fmt(last.risk_pct, 1)}%</span></div>
+      <div class="kv"><span class="k">Confidence</span><span class="v">${fmt(last.confidence, 2)}</span></div>
+      <div class="kv"><span class="k">Time</span><span class="v">${ts(last.ts)}</span></div>
+      <div class="kv"><span class="k">Playbook</span><span class="v">${last.playbook || "—"}</span></div>
+    </div>
+    <div style="color: var(--muted); margin-top: 8px; font-size: 12px;">${last.reasoning || ""}</div>`;
+}
+
+function renderSignals(signals) {
+  if (!signals || !signals.length) {
+    document.getElementById("signals-content").innerHTML = '<div class="empty">No signals yet.</div>';
+    return;
+  }
+  const rows = signals.slice(0, 25).map(s => {
+    const dir = (s.direction || "").toLowerCase();
+    const pill = dir === "buy"
+      ? '<span class="pill buy">BUY</span>' : '<span class="pill sell">SELL</span>';
     return `<tr>
-      <td>${p.ticket}</td>
-      <td>${p.symbol}</td>
-      <td>${p.direction}</td>
-      <td class="num">${fmt(p.volume, 2)}</td>
-      <td class="num">${fmt(p.price_open, 5)}</td>
-      <td class="num">${fmt(p.sl, 5)}</td>
-      <td class="num">${fmt(p.tp, 5)}</td>
-      <td class="num ${clsP}">${fmt(p.profit)}</td>
+      <td>${ts(s.ts)}</td>
+      <td>${s.symbol}</td>
+      <td>${pill}</td>
+      <td class="num">${fmt(s.entry)}</td>
+      <td class="num">${fmt(s.stop_loss)}</td>
+      <td class="num">${fmt(s.take_profit)}</td>
+      <td class="num">${fmt(s.risk_pct, 1)}%</td>
+      <td class="num">${fmt(s.confidence, 2)}</td>
     </tr>`;
   }).join("");
-  document.getElementById("positions-content").innerHTML = `
+  document.getElementById("signals-content").innerHTML = `
     <table>
       <thead><tr>
-        <th>Ticket</th><th>Symbol</th><th>Side</th>
-        <th class="num">Lots</th><th class="num">Open</th>
-        <th class="num">SL</th><th class="num">TP</th><th class="num">P/L</th>
+        <th>Time</th><th>Symbol</th><th>Side</th>
+        <th class="num">Entry</th><th class="num">SL</th><th class="num">TP</th>
+        <th class="num">Risk</th><th class="num">Conf.</th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
@@ -262,120 +275,19 @@ function renderDecisions(decisions) {
     </table>`;
 }
 
-function renderOrders(orders) {
-  if (!orders || !orders.length) {
-    document.getElementById("orders-content").innerHTML = '<div class="empty">No orders yet.</div>';
-    return;
-  }
-  const rows = orders.slice(0, 25).map(o => {
-    const clsP = cls(o.entry);
-    return `<tr>
-      <td>${ts(o.ts)}</td>
-      <td>${o.symbol}</td>
-      <td>${o.direction}</td>
-      <td class="num">${fmt(o.lots, 2)}</td>
-      <td class="num">${fmt(o.entry, 5)}</td>
-      <td class="num">${fmt(o.sl, 5)}</td>
-      <td class="num">${fmt(o.tp, 5)}</td>
-      <td>${o.status}</td>
-    </tr>`;
-  }).join("");
-  document.getElementById("orders-content").innerHTML = `
-    <table>
-      <thead><tr>
-        <th>Time</th><th>Symbol</th><th>Side</th>
-        <th class="num">Lots</th><th class="num">Entry</th>
-        <th class="num">SL</th><th class="num">TP</th><th>Status</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table>`;
-}
-
-function drawEquity(rows) {
-  const canvas = document.getElementById("equity-canvas");
-  if (!canvas) return;
-  const ctx = canvas.getContext("2d");
-  // Use a device-pixel-ratio aware size.
-  const dpr = window.devicePixelRatio || 1;
-  const rect = canvas.getBoundingClientRect();
-  canvas.width = Math.max(300, Math.floor(rect.width * dpr));
-  canvas.height = Math.max(200, Math.floor(rect.height * dpr));
-  ctx.scale(dpr, dpr);
-  const w = rect.width, h = rect.height;
-  ctx.clearRect(0, 0, w, h);
-
-  if (!rows || rows.length < 2) {
-    ctx.fillStyle = "#8b949e";
-    ctx.font = "12px ui-sans-serif, system-ui";
-    ctx.fillText("Not enough data yet.", 12, 24);
-    return;
-  }
-  const pad = 32;
-  const xs = rows.map(r => r.ts);
-  const ys = rows.map(r => r.equity);
-  const xmin = Math.min(...xs), xmax = Math.max(...xs);
-  const ymin = Math.min(...ys), ymax = Math.max(...ys);
-  const yrange = (ymax - ymin) || 1;
-  const xrange = (xmax - xmin) || 1;
-  const X = (x) => pad + (x - xmin) / xrange * (w - 2 * pad);
-  const Y = (y) => h - pad - (y - ymin) / yrange * (h - 2 * pad);
-
-  // Grid lines.
-  ctx.strokeStyle = "#21272e";
-  ctx.lineWidth = 1;
-  for (let i = 0; i <= 4; i++) {
-    const y = pad + i * (h - 2 * pad) / 4;
-    ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(w - pad, y); ctx.stroke();
-  }
-  // Y-axis labels.
-  ctx.fillStyle = "#8b949e";
-  ctx.font = "11px ui-sans-serif, system-ui";
-  ctx.textAlign = "right";
-  for (let i = 0; i <= 4; i++) {
-    const v = ymax - i * yrange / 4;
-    const y = pad + i * (h - 2 * pad);
-    ctx.fillText(v.toFixed(2), pad - 4, y + 3);
-  }
-
-  // Line.
-  ctx.strokeStyle = "#58a6ff";
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  rows.forEach((r, i) => {
-    const x = X(r.ts), y = Y(r.equity);
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-  });
-  ctx.stroke();
-
-  // Filled area.
-  ctx.lineTo(X(rows[rows.length - 1].ts), h - pad);
-  ctx.lineTo(X(rows[0].ts), h - pad);
-  ctx.closePath();
-  ctx.fillStyle = "rgba(88, 166, 255, 0.12)";
-  ctx.fill();
-
-  // Last-value label.
-  const last = rows[rows.length - 1];
-  const lx = X(last.ts), ly = Y(last.equity);
-  ctx.fillStyle = "#e6edf3";
-  ctx.textAlign = "left";
-  ctx.fillText(last.equity.toFixed(2), lx + 6, ly - 6);
-}
-
 async function refresh() {
   try {
     const state = await getJSON("/api/state");
-    renderAccount(state.account, state.kill_switch, state.mt5_connected);
+    document.getElementById("banner").classList.toggle("active", !!state.kill_switch);
+    renderFeed(state.feed);
     renderToday(state.today);
-
-    const [decisions, orders, equity] = await Promise.all([
+    renderLastSignal(state.last_signal);
+    const [signals, decisions] = await Promise.all([
+      getJSON("/api/signals?limit=25"),
       getJSON("/api/decisions?limit=25"),
-      getJSON("/api/orders?limit=25"),
-      getJSON("/api/equity?days=7"),
     ]);
+    renderSignals(signals.signals);
     renderDecisions(decisions.decisions);
-    renderOrders(orders.orders);
-    drawEquity(equity.equity);
   } catch (e) {
     console.error("refresh failed:", e);
   }
@@ -383,12 +295,12 @@ async function refresh() {
 
 document.getElementById("refresh").addEventListener("click", refresh);
 document.getElementById("kill").addEventListener("click", async () => {
-  if (!confirm("Engage kill switch? All new orders will be halted.")) return;
+  if (!confirm("Engage kill switch? No new signals will be sent.")) return;
   await postJSON("/api/kill");
   await refresh();
 });
 document.getElementById("resume").addEventListener("click", async () => {
-  if (!confirm("Release kill switch and allow new orders?")) return;
+  if (!confirm("Release kill switch and allow new signals?")) return;
   await postJSON("/api/resume");
   await refresh();
 });

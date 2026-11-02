@@ -1,96 +1,105 @@
-# trader
+# trader — gold signals bot (XAUUSD, signals-only)
 
-Rules-based trading agent for **MetaTrader 5** — demo account only.
+Rules-based **signals-only** bot for gold (XAUUSD). No MT5, no trade
+execution, no broker account.
 
-It watches a watchlist on a schedule, builds technical snapshots (EMAs, RSI, ATR,
+It watches gold on a schedule, builds technical snapshots (EMAs, RSI, ATR,
 swing levels, fair value gaps, liquidity sweeps, market structure) from live
-candle data, runs a **deterministic rules engine** (no LLM, no network) for the
-SMC "sweep + FVG reclaim" setup, enforces hard risk limits in pure code, executes
-on a **MT5 demo account**, and journals every decision — taken or skipped — to
-SQLite. Ships with a pre-flight `doctor` command, a kill switch, a paper
+candle data, runs a **deterministic rules engine** (no LLM, no network) for
+the SMC "sweep + FVG reclaim" setup, enforces hard risk limits in pure code,
+sizes each setup against a **configured hypothetical balance** (default
+$10,000 — no real money anywhere), journals every signal, and posts it to
+Telegram. Ships with a pre-flight `doctor` command, a kill switch, a paper
 backtester, and a dark-theme web dashboard.
 
 ```
-scan watchlist → rules engine → risk veto/sizing → execute (demo) → journal → review
+scan watchlist → rules engine → risk veto/paper sizing → Telegram signal → journal
 ```
 
 ## Safety model (non-negotiable)
 
 | Invariant | Enforcement |
 |---|---|
-| **Demo account only** | `mode: demo` in `config.yaml` is validated by the loader; `MT5Client` asserts `account_info().trade_mode` is demo at connect **and before every order**. There is no live-trading code path. |
-| **The strategy proposes, code disposes** | `app/risk.py` is the *only* authority on position sizing and vetoes. Any decision failing a check is rejected and journaled with the reasons — regardless of what the rules engine suggested. |
-| **Kill switch** | Flag file `data/KILL_SWITCH` + `kill`/`resume` CLI commands + dashboard buttons. Checked before every order and every scan cycle; the dashboard shows a red banner while engaged. |
-| **Secrets never leak** | MT5 credentials live only in `.env` (gitignored). There are no API keys and no network calls in the decision path. |
-| **Single MT5 boundary** | Only `app/mt5_client.py` imports the `MetaTrader5` package. All other modules are mockable and testable without a terminal. |
+| **Signals only — never trades** | There is no order-placement code anywhere. `app/executor.py` and `app/mt5_client.py` were deleted; no module imports MetaTrader5. A signal is a message, not an order. |
+| **The strategy proposes, code disposes** | `app/risk.py` is the *only* authority on sizing and vetoes. Any decision failing a check is rejected and journaled with the reasons — regardless of what the rules engine suggested. |
+| **Kill switch** | Flag file `data/KILL_SWITCH` + `kill`/`resume` CLI commands + dashboard buttons. Checked by the risk gate before every signal; the dashboard shows a red banner while engaged. |
+| **Secrets never leak** | OANDA + Telegram credentials live only in `.env` (gitignored) or the Render dashboard. They are never printed, logged, or committed. The Deriv fallback needs no credentials at all. |
+| **Paper sizing** | Every signal prints risk$ and lots computed from `signals.hypothetical_balance_usd` (default $10,000) at `risk.max_risk_pct_per_trade` (default 1%): lots = risk$ / (SL$ x 100) for gold (1 lot = 100 oz). |
+
+## Market data
+
+| Feed | Role | Auth | Notes |
+|---|---|---|---|
+| **OANDA v20 Practice** (`api-fxpractice.oanda.com`) | MAIN | `OANDA_API_TOKEN` + `OANDA_ACCOUNT_ID` from env | Free practice account; M15/H1 candles + live pricing for `XAU_USD`. |
+| **Deriv WebSocket v3** | FALLBACK / cross-check | None (public `app_id` 1089) | `frxXAUUSD` ticks + native M15/H1 candles; ~1 tick/s; 5-endpoint failover; live tick stream for feed health. |
+
+`feed: auto` (default) uses OANDA when its credentials are present and the
+probe succeeds, otherwise Deriv. `--feed oanda|deriv` forces one feed.
+OANDA practice signup from Kenya is **unconfirmed** — try it and see; if
+OANDA won't onboard you, the bot runs fine on Deriv alone.
 
 ## Setup
 
 ### Prerequisites
 
-- **Windows** + **Python 3.11+**
-- **MetaTrader 5 desktop terminal** installed, logged into a **demo** account once
-  (the Python package cannot work without the terminal — `doctor` will tell you
-  exactly this if it's missing)
+- **Python 3.11+** (any OS — no Windows, no MT5 terminal needed)
 
 ### Install
 
-```powershell
+```bash
 git clone https://github.com/shahbzshah/trader.git
 cd trader
 
 python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
+.venv/bin/pip install -r requirements.txt
 
-copy .env.example .env
+cp .env.example .env
 # then edit .env:
-#   MT5_LOGIN / MT5_PASSWORD / MT5_SERVER   (from your broker's demo email)
-#   MT5_PATH                                (optional path to terminal64.exe)
+#   OANDA_API_TOKEN / OANDA_ACCOUNT_ID   (free Practice account, see .env.example)
+#   TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID (your own bot via @BotFather)
 
 python -m app.main doctor     # pre-flight — get every check to [OK]
 ```
 
 ### Verification order
 
-```powershell
-python -m app.main status                # real account, balance, positions
-python -m app.main analyze --dry         # snapshots + rules-engine decisions, zero orders
-python -m app.main once --analyze        # one full propose-only cycle
-python -m app.main run                   # scheduled loop
-uvicorn app.server:app                   # dashboard on http://127.0.0.1:8765
+```bash
+python -m app.main status --feed deriv   # feed + latest tick (works with no credentials)
+python -m app.main analyze --dry         # snapshots + rules-engine decisions + sizing preview, zero alerts
+python -m app.main once --feed deriv     # one full cycle (journals signals, sends Telegram if configured)
+python -m app.main run                   # scheduled loop (local)
+python -m app.main serve                 # scan loop + dashboard on $PORT (Render)
 ```
 
 ## CLI commands
 
 | Command | What it does |
 |---|---|
-| `python -m app.main doctor` | Pre-flight self-check: MT5 package, terminal connect, demo assert, per-symbol live data (suggests broker-suffix matches like `EURUSD.a`), rules-engine self-test, kill switch. Exit code 0 only when everything passes. |
-| `python -m app.main status` | Connection status, account balance/equity, open positions. Never crashes when MT5 is unavailable. |
-| `python -m app.main analyze --dry` | Build snapshots, run the rules engine, journal decisions. **Never orders.** |
-| `python -m app.main once` | One full trading cycle (ignores session hours). |
-| `python -m app.main once --analyze` | One propose-only cycle. |
-| `python -m app.main run` | Continuous loop on the configured schedule, session-hours aware. |
+| `python -m app.main doctor` | Pre-flight self-check: OANDA credentials (warn if missing), feed connect, per-symbol live data, rules-engine self-test, news calendar, Telegram token validation (`getMe` — sends no message), kill switch. Exit code 0 only when everything passes. |
+| `python -m app.main status` | Feed connection, latest tick, recent M15 candles, kill-switch state. Never crashes when no feed is reachable. |
+| `python -m app.main analyze --dry` | Build snapshots, run the rules engine, print decisions + paper sizing. **Never journals, never alerts.** |
+| `python -m app.main once` | One full cycle (ignores session hours). Signals are journaled + sent to Telegram. |
+| `python -m app.main once --analyze` | One propose-only cycle (no alerts). |
+| `python -m app.main run` | Continuous loop on the configured schedule, session-hours aware (local use). |
+| `python -m app.main serve` | Scan loop + dashboard web server on `0.0.0.0:$PORT` (Render free web service). |
 | `python -m app.main kill` / `resume` | Engage / release the kill switch. |
 | `python -m app.main review [--day YYYY-MM-DD]` | Daily report to `reports/`: stats, every decision + reasoning, deterministic advisory proposals. |
-| `python -m app.main backtest --symbol XAUUSD --timeframe M15 --csv data.csv` | Paper backtest of the rules engine on CSV candles (`time,open,high,low,close,volume`). No MT5, no network. Prints trades, win rate, avg R, profit factor, max drawdown. |
-
-Credentials are resolved from CLI flags first, then `.env` — so `run` works
-without repeating them on the command line.
+| `python -m app.main backtest --symbol XAUUSD --timeframe M15 --csv data.csv` | Paper backtest of the rules engine on CSV candles (`time,open,high,low,close,volume`). No feed, no network. Prints trades, win rate, avg R, profit factor, max drawdown. |
 
 ## Strategy: sweep + FVG reclaim
 
-One setup, traded mechanically (`app/strategy.py`, spec in
+One setup, run mechanically (`app/strategy.py`, spec in
 `knowledge/playbooks/sweep_fvg_reclaim.md`):
 
 - **Bias (H1):** market-structure trend up/down (BOS/CHoCH) aligned with EMA50.
 - **Trigger (M15):** liquidity sweep of the recent swing high/low within the
   last 5 bars — wick beyond the level, close back inside.
 - **Entry:** fresh, unfilled M15 fair value gap formed at/after the sweep;
-  limit order at the FVG midpoint.
+  limit entry at the FVG midpoint.
 - **Stop:** beyond the sweep extreme, never closer than 1x ATR14.
 - **Target:** single take-profit at 2R.
 - **Filters:** configured session hours only, spread cap, weekends skipped,
-  and a **news blackout** — no trades within ±30 min of a high-impact USD
+  and a **news blackout** — no signals within ±30 min of a high-impact USD
   event (free ForexFactory calendar feed, cached to `data/news_cache.json`,
   fail-open with a logged warning; see `news:` in `config.yaml`).
 
@@ -98,18 +107,38 @@ All thresholds are module-level constants at the top of `app/strategy.py`.
 The engine is deterministic: the same snapshot always yields the same
 decision. `no_trade` is the default action.
 
-Execution: the strategy's `entry_type="limit"` decisions are placed as
-broker **pending orders** (`app/executor.py` → `MT5Client.pending_order`),
-resting at the FVG midpoint until price touches them and expiring after 75
-minutes (matching the backtest's 5-bar pending window). Limit placement is
-validated against the live tick (buy limit below ask / sell limit above
-bid); mispriced or `entry_type`-unknown decisions are rejected before they
-reach the broker. `entry_type="market"` decisions still fill immediately.
+Signals: the strategy's `entry_type="limit"` decisions become Telegram
+alerts with entry/SL/TP + paper sizing. Limit placement is validated
+against the live tick (buy limit below ask / sell limit above bid);
+mispriced decisions are rejected before they are alerted. Identical
+signals are de-duplicated (same symbol/direction/entry/SL/TP already
+alerted today is not re-sent), and `signals.max_signals_per_day`
+(default 5) caps alert spam.
 
 ## Configuration highlights (`config.yaml`)
 
 - `symbols`: XAUUSD (gold only) — `timeframes`: M15, H1
 - `schedule.scan_interval_minutes`: 15 — `session_hours`: 08:00–20:00 UTC, weekends skipped
+- `signals.hypothetical_balance_usd`: 10000.0 — `signals.feed`: auto — `signals.max_signals_per_day`: 5
+
+## Deploying to Render (free)
+
+The bot runs as a **free web service** on a second Render workspace
+(separate Gmail account — the Crash 1000 bot already uses the first, and
+one workspace's 750 free instance-hours/month is not enough for two
+24/7 services).
+
+```bash
+# In the Render dashboard (second account), create a Web Service from this repo:
+#   runtime: Docker, plan: Free, region: Frankfurt
+#   health check path: /health
+# Then set these env vars in the dashboard (never commit them):
+#   OANDA_API_TOKEN, OANDA_ACCOUNT_ID, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+# Or use the blueprint: render.yaml (env vars are sync:false — set them in the dashboard)
+```
+
+Keep the service awake with a 5-minute pinger (e.g. UptimeRobot) on
+`/health` — it returns `{"ok": true, "feed_ok": ..., "last_tick_age_s": ...}`.
 
 ## Knowledge pack
 
@@ -126,38 +155,47 @@ edited automatically.
 ```
 trader/
 ├── app/
-│   ├── main.py          # CLI: run | once | analyze | backtest | status | doctor | kill | resume | review
-│   ├── mt5_client.py    # the ONLY MetaTrader5 import; connection, rates, orders
+│   ├── main.py          # CLI: run | serve | once | analyze | backtest | status | doctor | kill | resume | review
+│   ├── market_data.py   # shared feed types + MarketDataClient interface (no MT5)
+│   ├── oanda_client.py  # OANDA v20 Practice feed (MAIN)
+│   ├── deriv_client.py  # Deriv WebSocket v3 feed (FALLBACK) + live tick stream
+│   ├── signals.py       # signals pipeline: risk gate → paper sizing → dedupe → Telegram
+│   ├── telegram.py      # Telegram Bot API sender (send-only)
+│   ├── http_client.py   # httpx client construction (sandbox proxy-safe)
 │   ├── scanner.py       # live candles + indicators + SMC (FVG/sweep/structure) → snapshots
 │   ├── strategy.py      # deterministic rules engine + Decision schema (no LLM, no network)
 │   ├── brain.py         # decision interface: re-exports Decision/decide, playbook loader
 │   ├── backtest.py      # paper backtester: scanner → strategy → risk on CSV candles
 │   ├── risk.py          # PURE sizing + veto checks (the safety authority)
-│   ├── executor.py      # journal-verified order placement
-│   ├── journal.py       # SQLite (WAL): decisions, orders, equity
+│   ├── manage.py        # breakeven logic (retained, parked — no positions in signals-only)
+│   ├── journal.py       # SQLite (WAL): decisions (orders table stays empty by design)
 │   ├── scheduler.py     # APScheduler wiring + session-hours guard
-│   ├── server.py        # FastAPI dashboard API (state/decisions/equity/kill)
+│   ├── server.py        # FastAPI dashboard API (health/state/signals/decisions/kill)
 │   ├── review.py        # daily markdown reports (deterministic proposals)
 │   ├── config.py        # typed pydantic config + .env secrets loader
 │   └── web/static/index.html   # single-file dark-theme dashboard
 ├── knowledge/           # risk rules + the sweep+FVG playbook
-├── tests/               # no MT5/network needed (fakes + fixtures)
+├── tests/               # mocked feeds + live Deriv test (marked `live`)
 ├── data/                # runtime: journal.db, KILL_SWITCH (gitignored)
 ├── reports/             # generated daily reports (gitignored)
-├── config.yaml          # mode, symbols, schedule, risk limits
+├── config.yaml          # mode, symbols, schedule, risk limits, signals
+├── Dockerfile           # Render free web service image
+├── render.yaml          # Render blueprint (env vars set in dashboard)
 └── .env.example         # template for secrets
 ```
 
 ## Testing
 
-```powershell
-.venv\Scripts\pytest -q        # full suite, no MT5/network needed
+```bash
+.venv/bin/pytest -q        # full suite: mocked feeds + live Deriv test
+.venv/bin/pytest -q -m "not live"   # offline only
 ```
 
-The suite runs fully offline: a fake MetaTrader5 module emulates the terminal
-API, and hand-crafted candle fixtures exercise the FVG/sweep/structure
-detectors and the rules engine — including edge cases like filled gaps,
-missing bias, wide spreads, and order rejections.
+The suite runs mostly offline: mocked OANDA/Telegram HTTP, a mocked Deriv
+transport, and hand-crafted candle fixtures exercise the FVG/sweep/structure
+detectors, the rules engine, sizing, dedupe, and the kill switch. One test
+(`test_live_tick_and_candles`, marked `live`) hits the real Deriv public
+gateway and is skipped when the network is unavailable.
 
 ## Runtime artifacts (gitignored)
 
@@ -166,7 +204,6 @@ missing bias, wide spreads, and order rejections.
 
 ## Disclaimer
 
-Personal, educational project running on **demo accounts only**. Not financial
-advice. Trading involves substantial risk; the authors take no responsibility
-for any losses.
-
+Personal, educational project. Signals only — this bot never places a trade.
+Not financial advice. Trading involves substantial risk; the authors take no
+responsibility for any losses.

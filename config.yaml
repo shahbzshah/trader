@@ -38,6 +38,15 @@ news:
   min_impact: "High"
   window_minutes: 30    # no_trade within ±30 min of a high-impact USD event
 
+# Signals-only operation (no MT5, no trade execution).
+# Signals are sized against the hypothetical balance below, never real
+# money: lots = risk$ / (SL$ x 100) for gold (1 lot = 100 oz).
+signals:
+  hypothetical_balance_usd: 10000.0
+  feed: auto        # oanda (main) | deriv (fallback) | auto
+  telegram_enabled: true
+  max_signals_per_day: 5
+
 dashboard:
   host: "127.0.0.1"
   port: 8765

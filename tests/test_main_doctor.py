@@ -1,18 +1,13 @@
 """Tests for the `doctor` pre-flight command in app/main.py.
 
-The doctor runs against a FakeMT5 so every branch (package missing,
-terminal unreachable, live account, missing symbol, broker-suffix
-suggestion) can be exercised deterministically.
+The doctor runs against a fake market feed so every branch (feed down,
+symbol with no data, kill switch) can be exercised deterministically.
 """
 
 from __future__ import annotations
 
-from tests.fake_mt5 import (
-    ACCOUNT_TRADE_MODE_REAL,
-    FakeRatesRow,
-    FakeSymbolInfo,
-    FakeTick,
-)
+from app.market_data import MarketDataError, Rates, Tick
+from tests.fake_client import FakeClient, rates_from_rows
 
 
 def _install_cfg(monkeypatch, tmp_path, *, symbols, timeframes=("M15",)):
@@ -23,101 +18,92 @@ def _install_cfg(monkeypatch, tmp_path, *, symbols, timeframes=("M15",)):
     cfg = cfg.model_copy(
         update={"symbols": list(symbols), "timeframes": list(timeframes)}
     )
+    cfg.paths.data_dir = str(tmp_path)
+    cfg.paths.kill_switch_path = str(tmp_path / "KILL_SWITCH")
     import app.main as main_module
 
     monkeypatch.setattr(main_module, "load_config", lambda *a, **k: cfg)
+    return cfg
+
+
+def _install_feed(monkeypatch, fake):
+    from app import main as main_module
+
+    monkeypatch.setattr(
+        main_module, "build_market_client", lambda *a, **k: (fake, "fake"))
 
 
 def _add_rates(fake, n: int = 10) -> None:
     base = 1_700_000_000
-    fake.rates_data = [
-        FakeRatesRow(
-            time=base + i * 900,
-            open=1.10,
-            high=1.11,
-            low=1.09,
-            close=1.105,
-            tick_volume=100,
-            spread=2,
-            real_volume=0,
-        )
+    fake.rates_by_tf[("XAUUSD", "M15")] = Rates(rates=[
+        {"time": base + i * 900, "open": 1900.0, "high": 1901.0,
+         "low": 1899.0, "close": 1900.5, "tick_volume": 0,
+         "spread": None, "real_volume": 0}
         for i in range(n)
-    ]
+    ])
+    fake.tick = Tick(bid=1900.4, ask=1900.5, spread=10.0, time=base)
 
 
 def _run_doctor() -> int:
     from app.main import main
 
-    argv = [
-        "--config", "config.yaml",
-        "doctor",
-        "--login", "0",
-        "--password", "",
-        "--server", "",
-        "--path", "",
-    ]
-    return main(argv)
+    return main(["--config", "config.yaml", "doctor"])
 
 
-def test_doctor_all_green(capsys, monkeypatch, tmp_path, fake_mt5):
-    _install_cfg(monkeypatch, tmp_path, symbols=["EURUSD"])
-    _add_rates(fake_mt5)
+def test_doctor_all_green(capsys, monkeypatch, tmp_path):
+    _install_cfg(monkeypatch, tmp_path, symbols=["XAUUSD"])
+    fake = FakeClient()
+    _add_rates(fake)
+    _install_feed(monkeypatch, fake)
     rc = _run_doctor()
     out = capsys.readouterr().out
     assert rc == 0
     assert "[OK]" in out
     assert "All checks passed." in out
     assert "[FAIL]" not in out
-    assert "demo account" in out
-    assert "symbol EURUSD live data" in out
+    assert "market feed" in out
+    assert "symbol XAUUSD live data" in out
+    # No OANDA creds / Telegram in the test env: warnings, not failures.
+    assert "OANDA credentials" in out
+    assert "Telegram alerts" in out
 
 
-def test_doctor_suggests_broker_suffix_match(capsys, monkeypatch, tmp_path, fake_mt5):
-    """EURUSD configured but only EURUSD.m in the terminal -> warn + suggest."""
-    _install_cfg(monkeypatch, tmp_path, symbols=["EURUSD"])
-    _add_rates(fake_mt5)
-    fake_mt5.symbols_get_result = [FakeSymbolInfo(name="EURUSD.m")]
-    fake_mt5.tick_data["EURUSD.m"] = FakeTick(bid=1.1, ask=1.1001, time=1_700_000_000)
-    rc = _run_doctor()
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "possible broker-suffix matches" in out
-    assert "EURUSD.m" in out
+def test_doctor_fails_when_feed_down(capsys, monkeypatch, tmp_path):
+    from app import main as main_module
 
-
-def test_doctor_fails_when_symbol_absent(capsys, monkeypatch, tmp_path, fake_mt5):
-    _install_cfg(monkeypatch, tmp_path, symbols=["ZZZUSD"])
-    _add_rates(fake_mt5)
+    _install_cfg(monkeypatch, tmp_path, symbols=["XAUUSD"])
+    monkeypatch.setattr(
+        main_module, "build_market_client",
+        lambda *a, **k: (_ for _ in ()).throw(
+            MarketDataError("all feeds down")))
     rc = _run_doctor()
     out = capsys.readouterr().out
     assert rc == 1
-    assert "not present in terminal" in out
+    assert "market feed" in out
+    assert "[FAIL]" in out
+
+
+def test_doctor_fails_when_symbol_has_no_data(capsys, monkeypatch, tmp_path):
+    _install_cfg(monkeypatch, tmp_path, symbols=["XAUUSD"])
+    fake = FakeClient()  # no rates, no tick
+    _install_feed(monkeypatch, fake)
+    rc = _run_doctor()
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "symbol XAUUSD live data" in out
     assert "1 check(s) FAILED" in out
 
 
-def test_doctor_fails_on_real_account(capsys, monkeypatch, tmp_path, fake_mt5):
-    """Safety invariant: a live account must make doctor fail loudly."""
-    _install_cfg(monkeypatch, tmp_path, symbols=["EURUSD"])
-    _add_rates(fake_mt5)
-    fake_mt5.trade_mode = ACCOUNT_TRADE_MODE_REAL
+def test_doctor_warns_on_kill_switch(capsys, monkeypatch, tmp_path):
+    from pathlib import Path
+
+    cfg = _install_cfg(monkeypatch, tmp_path, symbols=["XAUUSD"])
+    fake = FakeClient()
+    _add_rates(fake)
+    _install_feed(monkeypatch, fake)
+    Path(cfg.paths.kill_switch_path).touch()
     rc = _run_doctor()
     out = capsys.readouterr().out
-    assert rc == 1
-    assert "non-demo account" in out
-
-
-def test_doctor_reports_missing_metatrader5(capsys, monkeypatch, tmp_path):
-    import app.mt5_client as client_module
-
-    _install_cfg(monkeypatch, tmp_path, symbols=["EURUSD"])
-    monkeypatch.setattr(client_module, "_mt5", None)
-    monkeypatch.setattr(
-        client_module,
-        "_get_mt5",
-        lambda: (_ for _ in ()).throw(ImportError("MetaTrader5 not installed")),
-    )
-    rc = _run_doctor()
-    out = capsys.readouterr().out
-    assert rc == 1
-    assert "MetaTrader5 package import" in out
-    assert "Install with" in out
+    assert rc == 0
+    assert "kill switch" in out
+    assert "ENGAGED" in out

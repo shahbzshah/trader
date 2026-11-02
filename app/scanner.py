@@ -525,9 +525,13 @@ def build_snapshot(
         )
         snap["swing_high"] = sh
         snap["swing_low"] = sl
-        # spread from the primary timeframe's last bar
+        # spread from the primary timeframe's last bar. Feeds that do
+        # not report a spread (Deriv, OANDA) leave it None — the live
+        # tick spread (set by scan_watchlist) is used instead.
         if "spread" in primary_df.columns and not primary_df.empty:
-            snap["spread"] = int(primary_df["spread"].iloc[-1])
+            last_spread = primary_df["spread"].iloc[-1]
+            if pd.notna(last_spread):
+                snap["spread"] = int(last_spread)
         snap["primary_timeframe"] = primary_tf
 
     for pos in positions:
@@ -551,8 +555,8 @@ def scan_watchlist(client: Any, config: Any) -> list[dict]:
     """Scan every symbol in ``config.symbols`` over every timeframe in
     ``config.timeframes`` and return a list of snapshot dicts.
 
-    This is the only function in this module that touches I/O (the MT5
-    client). Indicators stay pure inside ``build_snapshot``.
+    This is the only function in this module that touches I/O (the
+    market-data client). Indicators stay pure inside ``build_snapshot``.
 
     Returns an empty list (no exception) for any symbol whose rates fetch
     fails, so one broken symbol doesn't kill the whole scan.

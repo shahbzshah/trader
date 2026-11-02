@@ -13,22 +13,17 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 # Ensure no stray env vars leak into config tests.
-for key in ("MT5_LOGIN", "MT5_PASSWORD", "MT5_SERVER", "MT5_PATH"):
+for key in ("OANDA_API_TOKEN", "OANDA_ACCOUNT_ID",
+            "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
     os.environ.pop(key, None)
 
 
 @pytest.fixture
-def fake_mt5():
-    """Provide a fresh FakeMT5 and install it as app.mt5_client._mt5."""
-    from tests.fake_mt5 import FakeMT5, make_fake
+def fake_client():
+    """Provide a fresh fake market-data client (no network, no MT5)."""
+    from tests.fake_client import FakeClient
 
-    fake = make_fake()
-    import app.mt5_client as client_module
-
-    prev = client_module._mt5
-    client_module._mt5 = fake
-    yield fake
-    client_module._mt5 = prev
+    return FakeClient()
 
 
 @pytest.fixture
@@ -43,13 +38,13 @@ def config_yaml_path(repo_root: Path) -> Path:
 
 @pytest.fixture
 def env_path(repo_root: Path, tmp_path: Path) -> Path:
-    """Create a temp .env with all required MT5 creds."""
+    """Create a temp .env with OANDA + Telegram secrets."""
     p = tmp_path / ".env"
     p.write_text(
-        "MT5_LOGIN=12345\n"
-        "MT5_PASSWORD=secret\n"
-        "MT5_SERVER=Broker-Demo\n"
-        "MT5_PATH=\n",
+        "OANDA_API_TOKEN=tok-abc\n"
+        "OANDA_ACCOUNT_ID=001-011-1234567-001\n"
+        "TELEGRAM_BOT_TOKEN=bot-xyz\n"
+        "TELEGRAM_CHAT_ID=123456789\n",
         encoding="utf-8",
     )
     return p

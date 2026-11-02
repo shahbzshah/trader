@@ -29,6 +29,9 @@ def test_load_config_from_real_yaml(config_yaml_path, env_path):
     assert cfg.risk.max_open_trades == 3
     assert cfg.risk.max_trades_per_day == 5
     assert cfg.dashboard.port == 8765
+    assert cfg.signals.hypothetical_balance_usd == 10000.0
+    assert cfg.signals.feed == "auto"
+    assert cfg.signals.max_signals_per_day == 5
     assert not hasattr(cfg, "llm")
     
 
@@ -69,22 +72,43 @@ def test_load_config_empty_symbols(tmp_path, env_path):
 def test_env_secrets_parsing(tmp_path):
     p = tmp_path / ".env"
     p.write_text(
-        "MT5_LOGIN=42\n"
-        "MT5_PASSWORD=pw\n"
-        "MT5_SERVER=S\n"
-        "LLM_API_KEY=k\n",
+        "OANDA_API_TOKEN=tok-1\n"
+        "OANDA_ACCOUNT_ID=001-011-1234567-001\n"
+        "TELEGRAM_BOT_TOKEN=bot-1\n"
+        "TELEGRAM_CHAT_ID=987654321\n",
         encoding="utf-8",
     )
     s = EnvSecrets.from_env(p)
-    assert s.mt5_login == 42
-    assert s.mt5_password == "pw"
-    assert s.mt5_server == "S"
-    
+    assert s.oanda_api_token == "tok-1"
+    assert s.oanda_account_id == "001-011-1234567-001"
+    assert s.telegram_bot_token == "bot-1"
+    assert s.telegram_chat_id == "987654321"
+
 
 def test_env_secrets_missing_file_ok(tmp_path):
     s = EnvSecrets.from_env(tmp_path / "missing.env")
-    assert s.mt5_login == 0
-    assert s.mt5_password == ""
+    assert s.oanda_api_token == ""
+    assert s.oanda_account_id == ""
+    assert s.telegram_bot_token == ""
+    assert s.telegram_chat_id == ""
+
+
+def test_env_secrets_process_env_fallback(tmp_path, monkeypatch):
+    monkeypatch.setenv("OANDA_API_TOKEN", "proc-tok")
+    monkeypatch.setenv("OANDA_ACCOUNT_ID", "proc-acct")
+    s = EnvSecrets.from_env(tmp_path / "missing.env")
+    assert s.oanda_api_token == "proc-tok"
+    assert s.oanda_account_id == "proc-acct"
+
+
+def test_signals_config_defaults():
+    from app.config import SignalsConfig
+
+    s = SignalsConfig()
+    assert s.hypothetical_balance_usd == 10000.0
+    assert s.feed == "auto"
+    assert s.telegram_enabled is True
+    assert s.max_signals_per_day == 5
 
 
 def test_session_hours_normalized():

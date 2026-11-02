@@ -14,4 +14,4 @@ logs/*.log
 reports/*.md
 !reports/.gitkeep
 .idea/
-.vscode/
+.vscode/data/*.csv

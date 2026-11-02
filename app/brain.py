@@ -5,7 +5,7 @@ deterministic rules engine in :mod:`app.strategy` -- no LLM, no network, no
 prompt composition, no retries.
 
 This module keeps its name and re-exports the ``Decision`` schema so that
-``app.executor``, ``app.journal`` and ``app.main`` imports keep working, and
+``app.signals``, ``app.journal`` and ``app.main`` imports keep working, and
 delegates decisions to the strategy. :func:`load_playbooks` is retained as a
 pure markdown loader (used by the review report to display playbook text).
 """

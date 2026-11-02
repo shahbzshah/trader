@@ -1,0 +1,27 @@
+# Render blueprint for the signals-only gold bot.
+# Deploy into the SECOND Render workspace (separate Gmail account) so the
+# 750 free instance-hours/month are not shared with the Crash 1000 bot.
+# DO NOT deploy until the OANDA + Telegram secrets are ready to paste in
+# the Render dashboard (Environment tab) — never commit them here.
+services:
+  - type: web
+    name: gold-signals-bot
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      # OANDA v20 Practice (MAIN feed) — set in the Render dashboard.
+      - key: OANDA_API_TOKEN
+        sync: false
+      - key: OANDA_ACCOUNT_ID
+        sync: false
+      # Telegram alerts — set in the Render dashboard.
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      # Optional: FEED=auto (default) | oanda | deriv
+      - key: FEED
+        value: auto

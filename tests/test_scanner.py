@@ -54,7 +54,7 @@ class FakePos:
 
 def rates_dict_to_rates_obj(d: list[dict], symbol: str = "EURUSD",
                              tf: str = "M15"):
-    """Wrap a list of rate dicts in the same shape as app.mt5_client.Rates."""
+    """Wrap a list of rate dicts in the same shape as app.market_data.Rates."""
 
     @dataclass
     class _Rates:
@@ -340,8 +340,9 @@ class FakeClient:
 
     def symbol_tick(self, symbol):
         self.calls.append(("symbol_tick", symbol))
-        from app.mt5_client import Tick
-        return Tick(symbol=symbol, bid=1.0, ask=1.0001, spread=0.0001, time=1)
+        from app.market_data import Tick
+        # spread is in POINTS (1 point = 0.0001 on EURUSD).
+        return Tick(bid=1.0, ask=1.0001, spread=1.0, time=1)
 
     def positions(self, symbol=None):
         self.calls.append(("positions", symbol))
@@ -390,9 +391,10 @@ def test_scan_watchlist_sets_spread_from_tick():
     client = FakeClient({("EURUSD", "M15"): rates_obj})
     cfg = Cfg(symbols=["EURUSD"], timeframes=["M15"])
     snaps = scan_watchlist(client, cfg)
-    # spread comes from the tick (bid=1.0, ask=1.0001 -> 0.0001)
+    # spread comes from the tick, in POINTS (bid=1.0, ask=1.0001 on
+    # EURUSD is 1 point).
     assert snaps[0]["spread"] is not None
-    assert snaps[0]["spread"] == pytest.approx(0.0001, abs=1e-9)
+    assert snaps[0]["spread"] == pytest.approx(1.0, abs=1e-9)
 
 # ---------------------------------------------------------------------------
 # SMC detectors: detect_fvg / detect_sweep / detect_structure
