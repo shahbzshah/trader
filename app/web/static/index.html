@@ -279,6 +279,34 @@
 </div>
 </div>
 </section>
+<!-- 2b. M15 CANDLE CHART (levels follow latest OPEN signal only) -->
+<section class="bg-surface-container-low border border-surface-variant rounded-lg p-space-sm space-y-2" id="section-chart">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-1.5">
+<span class="material-symbols-outlined text-primary text-sm">show_chart</span>
+<span class="font-label-sm text-label-sm font-bold text-on-surface">M15 CHART</span>
+<span class="text-label-sm font-label-sm text-outline" id="chart-symbol-label">XAU/USD · M15</span>
+</div>
+<div class="flex items-center gap-1">
+<button class="w-8 h-8 min-h-[32px] flex items-center justify-center rounded border border-surface-variant bg-surface-container-lowest text-primary active:scale-95" id="chart-zoom-out" aria-label="Show more bars">
+<span class="material-symbols-outlined text-base">remove</span>
+</button>
+<span class="font-label-sm text-label-sm text-on-surface-variant w-14 text-center" id="chart-bars-label">40 bars</span>
+<button class="w-8 h-8 min-h-[32px] flex items-center justify-center rounded border border-surface-variant bg-surface-container-lowest text-primary active:scale-95" id="chart-zoom-in" aria-label="Show fewer bars">
+<span class="material-symbols-outlined text-base">add</span>
+</button>
+</div>
+</div>
+<div class="bg-surface-container-lowest border border-surface-variant rounded overflow-hidden">
+<canvas id="chart-canvas" class="w-full block" style="height: 180px;"></canvas>
+</div>
+<div class="flex flex-wrap gap-x-3 gap-y-0.5 font-label-sm text-label-sm text-outline" id="chart-legend">
+<span><span class="inline-block w-2 h-2 rounded-full bg-primary align-middle"></span> Entry</span>
+<span><span class="inline-block w-2 h-2 rounded-full bg-secondary align-middle"></span> TP1 / TP2</span>
+<span><span class="inline-block w-2 h-2 rounded-full bg-error align-middle"></span> SL</span>
+<span id="chart-updated-label">—</span>
+</div>
+</section>
 <!-- 3. NEWS BLACKOUT & HIGH-IMPACT CALENDAR WARNING -->
 <section class="bg-surface-container-low border border-surface-variant rounded-lg p-space-sm space-y-2" id="section-news">
 <div class="flex items-center justify-between">
@@ -320,7 +348,7 @@
 <div class="grid grid-cols-3 gap-2 bg-surface-container-low border border-surface-variant p-2.5 rounded-lg text-center font-label-sm text-label-sm">
 <div>
 <span class="text-outline text-[10px] block">WIN RATE</span>
-<span class="font-ticker-lg text-ticker-lg text-secondary font-bold" id="stat-winrate">0%</span>
+<span class="font-ticker-lg text-ticker-lg text-secondary font-bold" id="stat-winrate">—</span>
 <span class="text-[9px] text-outline" id="stat-winloss">0W / 0L</span>
 </div>
 <div class="border-x border-surface-variant px-1">
@@ -355,6 +383,19 @@ No decisions logged yet.
 </div>
 </div>
 </div>
+<!-- 8. BOT CONFIG (read-only, from /api/config — no secrets) -->
+<section class="bg-surface-container-low border border-surface-variant rounded-lg p-space-sm space-y-2" id="section-config">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-1.5">
+<span class="material-symbols-outlined text-primary text-sm">tune</span>
+<span class="font-label-sm text-label-sm font-bold text-on-surface">BOT CONFIG</span>
+</div>
+<span class="text-label-sm font-label-sm text-on-surface-variant bg-surface-container-lowest px-1.5 py-0.5 rounded border border-surface-variant">READ-ONLY</span>
+</div>
+<div class="space-y-2 font-body-sm text-body-sm" id="config-body">
+<div class="text-label-sm font-label-sm text-outline text-center py-2">Loading config…</div>
+</div>
+</section>
 </main>
 <!-- BOTTOM NAVBAR -->
 <nav class="bg-surface-container-lowest dark:bg-surface-container-lowest text-primary dark:text-primary docked full-width bottom-0 fixed bottom-0 left-0 w-full z-50 flex justify-around items-center px-space-xs py-space-xs border-t-0 shadow-lg">
@@ -366,7 +407,7 @@ No decisions logged yet.
 <span class="material-symbols-outlined text-xl">analytics</span>
 <span>Signals</span>
 </a>
-<a class="flex flex-col items-center justify-center text-outline dark:text-outline font-label-sm text-label-sm py-space-xs min-h-[44px] min-w-[64px] hover:text-on-surface dark:hover:text-on-surface active:scale-95 transition-transform duration-100" href="#view-logs" id="nav-filters">
+<a class="flex flex-col items-center justify-center text-outline dark:text-outline font-label-sm text-label-sm py-space-xs min-h-[44px] min-w-[64px] hover:text-on-surface dark:hover:text-on-surface active:scale-95 transition-transform duration-100" href="#section-config" id="nav-filters">
 <span class="material-symbols-outlined text-xl">rule</span>
 <span>Filters</span>
 </a>
@@ -460,6 +501,16 @@ No decisions logged yet.
       if (s.scan_interval_minutes != null) {
         $('scan-interval-label').textContent = 'Continuous Engine Cycle (' + s.scan_interval_minutes + 'm scans)';
       }
+      // History stats come from the server's ledger block — never
+      // recomputed here. Hit rate is null (shown as —) until at least
+      // one signal has closed; counts and net R are honest zeros.
+      const st = s.stats;
+      if (st) {
+        $('stat-winrate').textContent = st.hit_rate != null ? Math.round(st.hit_rate * 100) + '%' : '—';
+        $('stat-winloss').textContent = st.wins + 'W / ' + st.losses + 'L';
+        $('stat-total').textContent = st.total_signals;
+        $('stat-netr').textContent = (st.net_r >= 0 ? '+' : '') + Number(st.net_r).toFixed(1) + ' R';
+      }
       const p = s.price || {};
       if (p.mid != null) {
         const prev = lastPrice;
@@ -476,6 +527,7 @@ No decisions logged yet.
           box.classList.add(p.mid >= prev ? 'flash-up' : 'flash-down');
         }
         updateHeroLive();
+        drawChart(); // keep the LIVE price line fresh
       }
       const d = s.day;
       const pill = $('price-change-pill');
@@ -697,23 +749,14 @@ No decisions logged yet.
     }
 
     function renderHistory(signals) {
-      let wins = 0, losses = 0, netR = 0, netUsd = 0;
+      // Net USD is derived from the real closed-signal ledger only;
+      // win rate / total / net R come from the server stats block
+      // (applyState) and are never recomputed here.
+      let netUsd = 0;
       signals.forEach((s) => {
-        if (s.status === 'TP') {
-          wins += 1;
-          if (s.r != null) netR += s.r;
-          if (s.r != null && s.risk_usd != null) netUsd += s.r * s.risk_usd;
-        } else if (s.status === 'SL') {
-          losses += 1;
-          netR -= 1;
-          if (s.risk_usd != null) netUsd -= s.risk_usd;
-        }
+        if (s.status === 'TP' && s.r != null && s.risk_usd != null) netUsd += s.r * s.risk_usd;
+        else if (s.status === 'SL' && s.risk_usd != null) netUsd -= s.risk_usd;
       });
-      const closed = wins + losses;
-      $('stat-winrate').textContent = closed ? Math.round((wins / closed) * 100) + '%' : '0%';
-      $('stat-winloss').textContent = wins + 'W / ' + losses + 'L';
-      $('stat-total').textContent = signals.length;
-      $('stat-netr').textContent = (netR >= 0 ? '+' : '') + netR.toFixed(1) + ' R';
       $('stat-netusd').textContent = fmtMoney(netUsd);
       const list = $('history-list');
       if (!signals.length) {
@@ -758,6 +801,7 @@ No decisions logged yet.
         latestSignal = signalsCache.length ? signalsCache[0] : null;
         renderHero();
         renderHistory(signalsCache);
+        drawChart(); // levels follow the latest signal
       } catch (e) { /* keep last values */ }
     }
 
@@ -796,6 +840,213 @@ No decisions logged yet.
         const data = await r.json();
         renderDecisions(data.decisions || []);
       } catch (e) { /* keep last values */ }
+    }
+
+    // ---------- candle chart (M15, levels follow latest signal) ----------
+    let candlesCache = [];
+    let candlesUpdatedAt = null;
+    let chartBars = 40;
+    const CHART_MIN_BARS = 10, CHART_MAX_BARS = 160;
+
+    function chartLevels() {
+      const sig = latestSignal;
+      if (!sig || sig.entry == null || sig.stop_loss == null || sig.take_profit == null) return null;
+      if (sig.status === 'TP' || sig.status === 'SL') {
+        // Closed: only the exit marker remains.
+        return { closed: true, status: sig.status, closePrice: sig.close_price, r: sig.r };
+      }
+      const dir = (sig.direction || '').toLowerCase();
+      const slDist = Math.abs(sig.entry - sig.stop_loss);
+      // TP1 = the 1R level (entry +/- one SL distance toward TP);
+      // TP2 = the signal's own take-profit.
+      const tp1 = dir === 'buy' ? sig.entry + slDist : sig.entry - slDist;
+      return { closed: false, entry: sig.entry, sl: sig.stop_loss, tp1: tp1, tp2: sig.take_profit, ts: sig.ts };
+    }
+
+    function drawChart() {
+      const canvas = $('chart-canvas');
+      if (!canvas) return;
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth;
+      const h = 180;
+      if (!w) return;
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+      const ctx = canvas.getContext('2d');
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = '#0a0e16';
+      ctx.fillRect(0, 0, w, h);
+      const GUTTER = 96; // right price-label column
+      const plotW = w - GUTTER - 4;
+      const plotH = h - 18;
+      if (!candlesCache.length) {
+        // Honest empty state — never invented bars.
+        ctx.fillStyle = '#a08e7a';
+        ctx.font = '12px Inter, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('No candle data — feed offline or warming up', w / 2, h / 2 - 6);
+        ctx.font = '10px Inter, sans-serif';
+        ctx.fillText('Levels appear with the next signal', w / 2, h / 2 + 12);
+        $('chart-bars-label').textContent = '0 bars';
+        $('chart-updated-label').textContent = '—';
+        return;
+      }
+      const vis = candlesCache.slice(-chartBars);
+      const lv = chartLevels();
+      let lo = Infinity, hi = -Infinity;
+      vis.forEach((c) => { lo = Math.min(lo, c.low); hi = Math.max(hi, c.high); });
+      const levelPrices = [];
+      if (lv) {
+        if (lv.closed) { if (lv.closePrice != null) levelPrices.push(lv.closePrice); }
+        else levelPrices.push(lv.entry, lv.sl, lv.tp1, lv.tp2);
+      }
+      levelPrices.forEach((p) => { lo = Math.min(lo, p); hi = Math.max(hi, p); });
+      if (lastPrice != null) { lo = Math.min(lo, lastPrice); hi = Math.max(hi, lastPrice); }
+      const pad = Math.max((hi - lo) * 0.08, 0.5);
+      lo -= pad; hi += pad;
+      const y = (p) => 4 + (hi - p) / (hi - lo) * plotH;
+      const bw = plotW / vis.length;
+      const bodyW = Math.max(1, bw * 0.6);
+      vis.forEach((c, i) => {
+        const x = 4 + i * bw + bw / 2;
+        const up = c.close >= c.open;
+        ctx.strokeStyle = up ? '#4edea3' : '#ef4444';
+        ctx.fillStyle = up ? '#4edea3' : '#ef4444';
+        ctx.beginPath();
+        ctx.moveTo(x, y(c.high));
+        ctx.lineTo(x, y(c.low));
+        ctx.stroke();
+        ctx.fillRect(x - bodyW / 2, y(Math.max(c.open, c.close)), bodyW, Math.max(1, Math.abs(y(c.open) - y(c.close))));
+      });
+      // Level lines are drawn at their true price; their text labels go
+      // through a de-collision pass below (LIVE vs ENTRY sit ~$1 apart
+      // when a signal just fired, and would otherwise print on top of
+      // each other).
+      const pendingLabels = [];
+      function levelLine(price, color, label, dash) {
+        if (price == null) return;
+        ctx.strokeStyle = color;
+        ctx.setLineDash(dash || [4, 3]);
+        ctx.beginPath();
+        ctx.moveTo(4, y(price));
+        ctx.lineTo(4 + plotW, y(price));
+        ctx.stroke();
+        ctx.setLineDash([]);
+        pendingLabels.push({ y: y(price), color: color, label: label });
+      }
+      function drawLevelLabels() {
+        pendingLabels.sort((a, b) => a.y - b.y);
+        let lastY = -Infinity;
+        ctx.font = 'bold 9px JetBrains Mono, monospace';
+        ctx.textAlign = 'left';
+        pendingLabels.forEach((l) => {
+          const ly = Math.min(plotH + 2, Math.max(10, Math.max(l.y, lastY + 12)));
+          ctx.fillStyle = l.color;
+          ctx.fillText(l.label, w - GUTTER + 4, ly + 3);
+          lastY = ly;
+        });
+      }
+      if (lv) {
+        if (lv.closed) {
+          const col = lv.status === 'TP' ? '#4edea3' : '#ef4444';
+          levelLine(lv.closePrice, col, 'EXIT ' + fmt(lv.closePrice) + ' · ' + lv.status, []);
+        } else {
+          levelLine(lv.tp2, '#4edea3', 'TP2 ' + fmt(lv.tp2));
+          levelLine(lv.tp1, '#4edea3', 'TP1 ' + fmt(lv.tp1));
+          levelLine(lv.entry, '#ffc174', 'ENTRY ' + fmt(lv.entry));
+          levelLine(lv.sl, '#ef4444', 'SL ' + fmt(lv.sl));
+          // Entry dot at the bar nearest the signal time (clamped to view).
+          let idx = vis.length - 1;
+          for (let i = 0; i < vis.length; i++) {
+            if (vis[i].epoch >= lv.ts) { idx = i; break; }
+          }
+          const x = 4 + idx * bw + bw / 2;
+          ctx.fillStyle = '#ffc174';
+          ctx.strokeStyle = '#0a0e16';
+          ctx.beginPath();
+          ctx.arc(x, y(lv.entry), 4, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        }
+      }
+      if (lastPrice != null) levelLine(lastPrice, '#ffc174', 'LIVE ' + fmt(lastPrice), [2, 3]);
+      drawLevelLabels();
+      ctx.fillStyle = '#a08e7a';
+      ctx.font = '9px JetBrains Mono, monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText(utcHM(new Date(vis[0].epoch * 1000).toISOString()) + ' UTC', 4, h - 5);
+      ctx.textAlign = 'right';
+      ctx.fillText(utcHM(new Date(vis[vis.length - 1].epoch * 1000).toISOString()) + ' UTC', w - 4, h - 5);
+      $('chart-bars-label').textContent = vis.length + ' bars';
+      $('chart-updated-label').textContent = candlesUpdatedAt
+        ? 'Updated ' + utcHMS(candlesUpdatedAt) + ' UTC' : '';
+    }
+
+    async function fetchCandles() {
+      try {
+        const r = await fetch('/api/candles?limit=200');
+        if (!r.ok) return;
+        const data = await r.json();
+        candlesCache = data.candles || [];
+        candlesUpdatedAt = Math.floor(Date.now() / 1000);
+        $('chart-symbol-label').textContent = (data.symbol || 'XAU/USD') + ' · ' + (data.timeframe || 'M15');
+        drawChart();
+      } catch (e) { /* keep last candles */ }
+    }
+
+    function setChartBars(n) {
+      chartBars = Math.min(CHART_MAX_BARS, Math.max(CHART_MIN_BARS, n));
+      drawChart();
+    }
+    $('chart-zoom-in').addEventListener('click', () => setChartBars(chartBars - 10));
+    $('chart-zoom-out').addEventListener('click', () => setChartBars(chartBars + 10));
+    $('chart-canvas').addEventListener('wheel', (e) => {
+      e.preventDefault();
+      setChartBars(chartBars + (e.deltaY > 0 ? 10 : -10));
+    }, { passive: false });
+    window.addEventListener('resize', drawChart);
+
+    // ---------- config (read-only, from /api/config — no secrets) ----------
+    function cfgRow(label, value) {
+      return '<div class="flex justify-between gap-2 py-1 border-b border-surface-variant/50 last:border-0"><span class="text-outline shrink-0">' + esc(label) + '</span><span class="font-mono text-on-surface text-right break-words">' + esc(value) + '</span></div>';
+    }
+    function cfgGroup(title, rows) {
+      return '<div class="bg-surface-container-lowest border border-surface-variant rounded p-2"><div class="font-label-sm text-label-sm text-primary font-bold tracking-wide mb-1">' + esc(title) + '</div>' + rows + '</div>';
+    }
+    function renderConfig(c) {
+      const onOff = (v) => v ? 'On' : 'Off';
+      const sh = c.session_hours || {};
+      const news = c.news || {};
+      const risk = c.risk || {};
+      const sig = c.signals || {};
+      $('config-body').innerHTML =
+        cfgGroup('CONNECTION', cfgRow('Mode', c.mode || '—')
+          + cfgRow('Feed', (c.feed || '—') + ' → live: ' + (c.live_feed || 'offline'))
+          + cfgRow('Symbol', (c.symbols || []).join(', ') || '—')
+          + cfgRow('Timeframe', c.timeframe || '—')
+          + cfgRow('Scan interval', (c.scan_interval_minutes != null ? c.scan_interval_minutes + ' min' : '—')))
+        + cfgGroup('SESSION & KILL ZONES', cfgRow('Session', (sh.start || '—') + '–' + (sh.end || '—') + ' ' + (sh.timezone || 'UTC') + (sh.skip_weekends ? ' · skips weekends' : ''))
+          + cfgRow('Kill zones', (c.kill_zones && c.kill_zones.length) ? c.kill_zones.join(' · ') : 'None'))
+        + cfgGroup('NEWS FILTER', cfgRow('Enabled', onOff(news.enabled))
+          + cfgRow('Min impact', news.min_impact || '—')
+          + cfgRow('Blackout window', (news.window_minutes != null ? '±' + news.window_minutes + ' min' : '—'))
+          + cfgRow('Currencies', (news.currencies || []).join(', ') || '—'))
+        + cfgGroup('RISK', cfgRow('Max risk / trade', (risk.max_risk_pct_per_trade != null ? risk.max_risk_pct_per_trade + '%' : '—'))
+          + cfgRow('Max daily loss', (risk.max_daily_loss_pct != null ? risk.max_daily_loss_pct + '%' : '—'))
+          + cfgRow('Max trades / day', risk.max_trades_per_day != null ? String(risk.max_trades_per_day) : '—')
+          + cfgRow('Min confidence', risk.min_confidence != null ? Number(risk.min_confidence).toFixed(2) : '—')
+          + cfgRow('Playbook', risk.default_playbook || '—')
+          + cfgRow('Breakeven', onOff(risk.breakeven_enabled) + (risk.breakeven_enabled && risk.breakeven_at_r != null ? ' @ ' + risk.breakeven_at_r + 'R' : '')))
+        + cfgGroup('SIZING & ALERTS', cfgRow('Hypothetical balance', sig.hypothetical_balance_usd != null ? '$' + fmt(sig.hypothetical_balance_usd, 0) : '—')
+          + cfgRow('Max signals / day', sig.max_signals_per_day != null ? String(sig.max_signals_per_day) : '—')
+          + cfgRow('Telegram alerts', onOff(sig.telegram_enabled)));
+    }
+    async function fetchConfig() {
+      try {
+        const r = await fetch('/api/config');
+        if (!r.ok) return;
+        renderConfig(await r.json());
+      } catch (e) { /* keep last config */ }
     }
 
     // ---------- kill switch ----------
@@ -872,7 +1123,7 @@ No decisions logged yet.
     }
     $('nav-monitor').addEventListener('click', (e) => { e.preventDefault(); setActiveNav('nav-monitor'); scrollToEl($('section-monitor')); });
     $('nav-signals').addEventListener('click', (e) => { e.preventDefault(); setActiveNav('nav-signals'); switchView('history'); scrollToEl($('view-history')); });
-    $('nav-filters').addEventListener('click', (e) => { e.preventDefault(); setActiveNav('nav-filters'); switchView('logs'); scrollToEl($('view-logs')); });
+    $('nav-filters').addEventListener('click', (e) => { e.preventDefault(); setActiveNav('nav-filters'); scrollToEl($('section-config')); });
     $('nav-calendar').addEventListener('click', (e) => { e.preventDefault(); setActiveNav('nav-calendar'); scrollToEl($('section-news')); });
 
     // ---------- freshness heartbeat (real tick age) ----------
@@ -895,7 +1146,9 @@ No decisions logged yet.
     fetchState();
     fetchSignals();
     fetchDecisions();
+    fetchCandles();
+    fetchConfig();
     setInterval(fetchState, 2000);
-    setInterval(() => { fetchSignals(); fetchDecisions(); }, 15000);
+    setInterval(() => { fetchSignals(); fetchDecisions(); fetchCandles(); fetchConfig(); }, 15000);
   </script>
 </body></html>

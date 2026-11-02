@@ -426,3 +426,91 @@ def test_material_symbols_rule_sets_icon_font(fake_app):
     assert "font-family:'Material Symbols Outlined'" in css
     assert client.get(
         "/static/fonts/MaterialSymbolsOutlined.woff2").status_code == 200
+
+
+# --- Dashboard parity: candles chart, server stats, read-only config ---
+
+def test_candles_endpoint_empty_feed(fake_app):
+    _, client, _, _ = fake_app
+    body = client.get("/api/candles?limit=200").json()
+    assert body["symbol"] == "XAUUSD"
+    assert body["timeframe"] == "M15"
+    assert body["candles"] == []
+    assert body["count"] == 0
+
+
+def test_candles_endpoint_oldest_first(fake_app):
+    from tests.fake_client import rates_from_rows
+    import time as _time
+
+    _, client, _, fake = fake_app
+    t0 = int(_time.time())
+    fake.rates_by_tf[("XAUUSD", "M15")] = rates_from_rows(
+        [(3900.0, 3905.0, 3895.0, 3901.0),
+         (3901.0, 3908.0, 3899.0, 3906.0)], t0=t0, step=900)
+    body = client.get("/api/candles?limit=200").json()
+    assert body["count"] == 2
+    assert body["candles"][0]["epoch"] == t0
+    assert body["candles"][0]["open"] == 3900.0
+    assert body["candles"][1]["close"] == 3906.0
+
+
+def test_state_stats_block_empty(fake_app):
+    _, client, _, _ = fake_app
+    stats = client.get("/api/state").json()["stats"]
+    assert stats == {"total_signals": 0, "open": 0, "closed": 0,
+                     "wins": 0, "losses": 0, "hit_rate": None,
+                     "net_r": 0, "avg_r": None}
+
+
+def test_state_stats_block_after_tp(fake_app):
+    from tests.fake_client import rates_from_rows
+    import time as _time
+
+    _, client, tmp_path, fake = fake_app
+    _record_signal(tmp_path)
+    t0 = int(_time.time()) + 900
+    fake.rates_by_tf[("XAUUSD", "M15")] = rates_from_rows(
+        [(3902.0, 3935.0, 3900.0, 3932.0)], t0=t0, step=900)
+    stats = client.get("/api/state").json()["stats"]
+    assert stats["total_signals"] == 1
+    assert stats["closed"] == 1
+    assert stats["wins"] == 1
+    assert stats["hit_rate"] == 1.0
+    assert stats["net_r"] == pytest.approx(2.0)
+    assert stats["avg_r"] == pytest.approx(2.0)
+
+
+def test_config_endpoint_shape_no_secrets(fake_app):
+    _, client, _, _ = fake_app
+    body = client.get("/api/config").json()
+    assert body["symbols"] == ["XAUUSD"]
+    assert body["timeframe"] == "M15"
+    assert body["scan_interval_minutes"] == 15
+    assert body["kill_zones"] == []
+    assert body["news"]["min_impact"] == "High"
+    assert body["news"]["window_minutes"] == 30
+    assert body["risk"]["max_risk_pct_per_trade"] == 1.0
+    assert body["risk"]["default_playbook"] == "sweep_fvg_reclaim"
+    assert body["signals"]["hypothetical_balance_usd"] == 10000.0
+    flat = json.dumps(body).lower()
+    for banned in ("api_key", "token", "secret", "password"):
+        assert banned not in flat
+
+
+def test_dashboard_has_chart_config_and_server_stats(fake_app):
+    _, client, _, _ = fake_app
+    body = client.get("/").text
+    # Candle chart wired to /api/candles, levels from latest signal.
+    assert "chart-canvas" in body
+    assert "/api/candles" in body
+    assert "chart-zoom-in" in body and "chart-zoom-out" in body
+    # Read-only config section wired to /api/config.
+    assert "section-config" in body
+    assert "/api/config" in body
+    # Stats line reads the server stats block, never a fake percentage.
+    assert "s.stats" in body
+    assert "hit_rate" in body
+    # No external URLs: fonts + Tailwind stay self-hosted.
+    assert "https://" not in body
+    assert "http://" not in body
