@@ -5,9 +5,23 @@ Endpoints:
     GET  /api/state     feed, kill switch, today's decisions/signals, last signal
     GET  /api/signals   recent signaled setups (approved propose decisions)
     GET  /api/decisions?limit=
+    GET  /api/candles   recent M15 candles (epoch/open/high/low/close)
+    GET  /api/config    read-only connection + strategy params (no secrets)
+    POST /explain       store an AI explanation on a signal record
     POST /api/kill
     POST /api/resume
     GET  /              serves the static dashboard page
+
+Signal history survives deploys: outcomes and explanations are kept
+in ``data/history_snapshot.json`` (latest 100 records) plus an
+append-only ``data/signal_history.jsonl`` archive (see app/history.py),
+loaded at startup and re-checked against live candles/ticks on every
+poll, so still-open signals resume TP/SL tracking after a restart.
+
+/api/state, /api/candles, /api/signals, /api/config and the dashboard
+page are gzip-compressed when the client sends Accept-Encoding: gzip
+and the body is >= 1024 bytes (same approach as the Crash bot's
+health.py); clients that never ask get plain JSON unchanged.
 
 The dashboard page lives at app/web/static/index.html and is served as a
 single-file vanilla-JS app. It polls /api/state every 2s and
@@ -21,6 +35,7 @@ down the API returns feed_ok=false and the page says so.
 from __future__ import annotations
 
 import datetime as _dt
+import gzip
 import json
 import logging
 import time
@@ -28,11 +43,19 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, field_validator, model_validator
 
 from app.config import load_config
+from app.history import (
+    append_archive,
+    archive_path,
+    load_snapshot,
+    snapshot_path,
+    write_snapshot,
+)
 from app.journal import Journal
 from app.market_data import XAUUSD_SPEC
 from app.news import get_events, in_blackout
@@ -44,6 +67,46 @@ _DEFAULT_LIMIT = 50
 _DAY_CACHE_TTL_S = 120.0
 _NEWS_CACHE_TTL_S = 120.0
 _CANDLES_CACHE_TTL_S = 60.0
+
+
+class ExplainRequest(BaseModel):
+    """AI explanation for one signal. ``signal_id`` (journal id) or
+    ``epoch`` (signal timestamp) locates the signal; ``explanation``
+    is stored verbatim with the signal record. Never touches signals,
+    entries, SL/TP or outcomes.
+
+    Module-level (not inside create_app): with
+    ``from __future__ import annotations`` FastAPI can only resolve a
+    body-model annotation that lives in module globals.
+    """
+
+    signal_id: int | None = None
+    epoch: int | None = None
+    explanation: str
+    model: str | None = None
+
+    @model_validator(mode="after")
+    def _needs_locator(self) -> "ExplainRequest":
+        if self.signal_id is None and self.epoch is None:
+            raise ValueError("signal_id or epoch is required")
+        return self
+
+    @field_validator("explanation")
+    @classmethod
+    def _explanation_nonempty(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("explanation must not be empty")
+        if len(v) > 10000:
+            raise ValueError("explanation too long (max 10000 chars)")
+        return v
+
+    @field_validator("model")
+    @classmethod
+    def _model_capped(cls, v: str | None) -> str | None:
+        if v is not None and len(v) > 200:
+            raise ValueError("model too long (max 200 chars)")
+        return v
 
 
 def create_app(
@@ -64,6 +127,15 @@ def create_app(
     else:
         journal = Journal(Path(cfg.paths.data_dir) / "journal.db")
 
+    # Durable signal history (survives deploys): snapshot + archive in
+    # the data dir. A missing/corrupt snapshot loads as empty — startup
+    # must never fail on it (see app/history.py).
+    _data_dir = Path(cfg.paths.data_dir)
+    _history_snapshot = snapshot_path(_data_dir)
+    _history_archive = archive_path(_data_dir)
+    _history_records = load_snapshot(_history_snapshot)
+    _history: dict[int, dict] = {r["id"]: r for r in _history_records}
+
     state: dict[str, Any] = {
         "client": components["client"] if components else None,
         "client_factory": client_factory,
@@ -71,6 +143,14 @@ def create_app(
         "kill_switch_path": Path(cfg.paths.kill_switch_path),
         "config_path": str(config_path),
         "started_at": time.time(),
+        # Signal id -> durable history record (enriched signal +
+        # outcome + optional AI explanation). Journal rows are the
+        # source of truth for signals; history restores records the
+        # journal lost on a redeploy and carries outcomes/explanations
+        # the journal schema has no columns for.
+        "history": _history,
+        "history_snapshot_path": _history_snapshot,
+        "history_archive_path": _history_archive,
         # TTL caches for the dashboard's live blocks (each entry is
         # {"ts": float, "data": ...}); a failed fetch caches its
         # failure briefly so one dead feed cannot stall every poll.
@@ -79,7 +159,13 @@ def create_app(
         "candles_cache": {"ts": 0.0, "data": None},
         # Signal id -> resolved outcome {"status", "close_ts",
         # "close_price", "r"}; once a signal hits TP/SL it never changes.
-        "resolved_outcomes": {},
+        # Seeded from the restored snapshot so resolved signals stay
+        # resolved across a restart.
+        "resolved_outcomes": {
+            r["id"]: {"status": r["status"], "close_ts": r.get("close_ts"),
+                      "close_price": r.get("close_price"), "r": r.get("r")}
+            for r in _history_records if r["status"] in ("TP", "SL")
+        },
         # Last time a feed build/connect failed; retries are throttled so
         # a dead feed cannot make /health (polled by a pinger) hang.
         "client_failed_at": 0.0,
@@ -410,6 +496,15 @@ def create_app(
             "confidence": row.get("confidence"),
             "playbook": row.get("playbook"),
             "reasoning": row.get("reasoning"),
+            # Outcome + explanation live in the durable history, not
+            # the journal; overlaid by _merged_signals when present.
+            "status": "OPEN",
+            "close_ts": None,
+            "close_price": None,
+            "r": None,
+            "explanation": None,
+            "explanation_model": None,
+            "explanation_ts": None,
         }
 
     def _candles_m15() -> list[dict]:
@@ -488,6 +583,187 @@ def create_app(
                                 "close_price": None, "r": None}
         return out
 
+    # --- gzip (same approach as the Crash bot's health.py) --------------
+
+    _GZIP_MIN_BYTES = 1024
+
+    def _client_accepts_gzip(request: Request) -> bool:
+        """True only when the client explicitly asks for gzip. Browsers
+        and the dashboard WebView send Accept-Encoding: gzip and
+        decompress transparently; clients that never ask keep getting
+        plain JSON exactly as before."""
+        accept = request.headers.get("accept-encoding", "") or ""
+        for token in accept.split(","):
+            token = token.strip().lower()
+            if token == "gzip" or token.startswith("gzip;"):
+                if "q=0" not in token:
+                    return True
+        return False
+
+    def _gzip_response(request: Request, payload: Any,
+                       status_code: int = 200) -> Response:
+        """JSON response, gzip-compressed when the client asks and the
+        body is >= 1024 bytes; plain JSON otherwise."""
+        body = json.dumps(payload).encode("utf-8")
+        headers: dict[str, str] = {}
+        if _client_accepts_gzip(request) and len(body) >= _GZIP_MIN_BYTES:
+            body = gzip.compress(body, compresslevel=6)
+            headers["Content-Encoding"] = "gzip"
+        return Response(content=body, media_type="application/json",
+                        headers=headers, status_code=status_code)
+
+    def _gzip_bytes_response(request: Request, body: bytes,
+                             media_type: str) -> Response:
+        headers: dict[str, str] = {}
+        if _client_accepts_gzip(request) and len(body) >= _GZIP_MIN_BYTES:
+            body = gzip.compress(body, compresslevel=6)
+            headers["Content-Encoding"] = "gzip"
+        return Response(content=body, media_type=media_type, headers=headers)
+
+    # --- durable history --------------------------------------------------
+
+    def _persist_history(changed: list[dict]) -> None:
+        """Append changed records to the archive and rewrite the
+        snapshot. Best-effort: persistence must never break a request."""
+        if not changed:
+            return
+        for rec in changed:
+            append_archive(state["history_archive_path"], rec)
+        write_snapshot(state["history_snapshot_path"],
+                       list(state["history"].values()))
+
+    def _merged_signals(limit: int = 1000) -> list[dict]:
+        """All known signals, newest first: journal rows (source of
+        truth) plus history records the journal lost on a redeploy.
+        A journal row wins over a restored record with the same id;
+        outcome + explanation are overlaid from history either way."""
+        history: dict[int, dict] = state["history"]
+        rows = journal.list_decisions(limit=1000)
+        signals: list[dict] = []
+        seen_ids: set[int] = set()
+        for row in rows:
+            if row.get("action") != "propose" or not row.get("approved"):
+                continue
+            sig = _enrich_signal(row)
+            rec = history.get(sig["id"])
+            if rec is not None:
+                for key in ("explanation", "explanation_model",
+                            "explanation_ts"):
+                    if rec.get(key) is not None:
+                        sig[key] = rec[key]
+            signals.append(sig)
+            seen_ids.add(sig["id"])
+        # Restored history: records whose journal row is gone (redeploy
+        # wiped the SQLite file). They already carry outcome fields.
+        for rec in history.values():
+            if rec["id"] in seen_ids:
+                continue
+            signals.append(dict(rec))
+        signals.sort(key=lambda s: (s["ts"], s["id"]), reverse=True)
+        return signals[:limit]
+
+    def _resolve_from_tick(sig: dict, mid: float,
+                           tick_ts: int | None) -> dict | None:
+        """Outcome of one still-open signal against the latest tick
+        mid-price: a tick through TP/SL resolves immediately instead of
+        waiting for the next M15 candle to close. Returns None when the
+        tick touches neither level."""
+        entry, sl, tp = sig["entry"], sig["stop_loss"], sig["take_profit"]
+        if entry is None or sl is None or tp is None:
+            return None
+        direction = (sig.get("direction") or "").lower()
+        if direction not in ("buy", "sell"):
+            return None
+        rr = sig.get("rr")
+        if direction == "buy":
+            if mid >= float(tp):
+                return {"status": "TP", "close_ts": tick_ts,
+                        "close_price": float(tp), "r": rr}
+            if mid <= float(sl):
+                return {"status": "SL", "close_ts": tick_ts,
+                        "close_price": float(sl), "r": -1.0}
+        else:
+            if mid <= float(tp):
+                return {"status": "TP", "close_ts": tick_ts,
+                        "close_price": float(tp), "r": rr}
+            if mid >= float(sl):
+                return {"status": "SL", "close_ts": tick_ts,
+                        "close_price": float(sl), "r": -1.0}
+        return None
+
+    def _refresh_outcomes(signals: list[dict],
+                          tick: dict | None = None) -> dict[int, dict]:
+        """Resolve outcomes for every signal against fresh M15 candles
+        (via _evaluate_outcomes) and then the latest tick for any still
+        open — this is the live path: every /api/state and /api/signals
+        poll re-checks open signals, so a TP/SL touch resolves within
+        one poll instead of waiting for an on-demand call. Newly seen
+        or newly resolved signals are persisted to the history
+        archive + snapshot."""
+        outcomes = _evaluate_outcomes(signals)
+        if tick is None:
+            tick = _tick_block()
+        mid = tick.get("mid")
+        if mid is not None:
+            for sig in signals:
+                outcome = outcomes.get(sig["id"])
+                if outcome is None or outcome["status"] != "OPEN":
+                    continue
+                res = _resolve_from_tick(sig, float(mid), tick.get("ts"))
+                if res is not None:
+                    outcomes[sig["id"]] = res
+                    state["resolved_outcomes"][sig["id"]] = res
+        # Sync the durable history: new signals get a record, resolved
+        # ones get their outcome. Only changed records are persisted.
+        history: dict[int, dict] = state["history"]
+        changed: list[dict] = []
+        for sig in signals:
+            outcome = outcomes.get(sig["id"]) or {
+                "status": "OPEN", "close_ts": None,
+                "close_price": None, "r": None,
+            }
+            rec = history.get(sig["id"])
+            merged = dict(sig)
+            merged.update(outcome)
+            if rec is not None:
+                for key in ("explanation", "explanation_model",
+                            "explanation_ts"):
+                    if rec.get(key) is not None:
+                        merged[key] = rec[key]
+            if rec is None or any(
+                merged.get(k) != rec.get(k) for k in merged
+            ):
+                history[sig["id"]] = merged
+                changed.append(merged)
+        _persist_history(changed)
+        return outcomes
+
+    def _compute_stats(signals: list[dict],
+                       outcomes: dict[int, dict]) -> dict:
+        """Ledger stats, computed from resolved outcomes only — never
+        invented. Hit rate and avg R are null until at least one signal
+        has closed; counts and net R are honest zeros when empty."""
+        total = len(signals)
+        closed = [s for s in signals
+                  if outcomes.get(s["id"], {}).get("status") in ("TP", "SL")]
+        wins = [s for s in closed
+                if outcomes[s["id"]]["status"] == "TP"]
+        losses = len(closed) - len(wins)
+        net_r = round(sum(
+            float(outcomes[s["id"]]["r"] or 0.0) for s in closed
+        ), 4)
+        return {
+            "total_signals": total,
+            "open": total - len(closed),
+            "closed": len(closed),
+            "wins": len(wins),
+            "losses": losses,
+            "hit_rate": (round(len(wins) / len(closed), 4)
+                         if closed else None),
+            "net_r": net_r,
+            "avg_r": (round(net_r / len(closed), 4) if closed else None),
+        }
+
     # --- routes -------------------------------------------------------
 
     @app.get("/health")
@@ -504,14 +780,26 @@ def create_app(
         })
 
     @app.get("/api/state")
-    def api_state() -> JSONResponse:
+    def api_state(request: Request) -> Response:
         start_ts, _ = journal.today_utc_window()
         today_decisions = journal.list_decisions(since_ts=start_ts, limit=200)
         signals_today = sum(
             1 for d in today_decisions
             if d["action"] == "propose" and d["approved"]
         )
-        return JSONResponse(
+        price = _tick_block()
+        # Live outcome refresh: open signals are re-checked against
+        # fresh candles + the latest tick on every poll, and the stats
+        # below come from that ledger only.
+        signals = _merged_signals(limit=1000)
+        outcomes = _refresh_outcomes(signals, tick=price)
+        for sig in signals:
+            sig.update(outcomes.get(sig["id"], {
+                "status": "OPEN", "close_ts": None,
+                "close_price": None, "r": None,
+            }))
+        return _gzip_response(
+            request,
             {
                 "ts": int(time.time()),
                 "uptime_s": int(time.time() - state["started_at"]),
@@ -521,7 +809,7 @@ def create_app(
                 ),
                 "kill_switch": _kill_engaged(),
                 "feed": _feed_block(),
-                "price": _tick_block(),
+                "price": price,
                 "day": _day_block(),
                 "news": _news_block(),
                 "telegram": {
@@ -537,37 +825,173 @@ def create_app(
                     "approved": sum(1 for d in today_decisions if d["approved"]),
                     "rejected": sum(1 for d in today_decisions if not d["approved"]),
                 },
+                "stats": _compute_stats(signals, outcomes),
                 "last_signal": _last_signal(),
             }
         )
 
     @app.get("/api/signals")
     def api_signals(
+        request: Request,
         limit: int = Query(_DEFAULT_LIMIT, ge=1, le=1000),
-    ) -> JSONResponse:
-        rows = journal.list_decisions(limit=1000)
-        signals = []
-        for row in rows:
-            if row.get("action") != "propose" or not row.get("approved"):
-                continue
-            signals.append(_enrich_signal(row))
-            if len(signals) >= limit:
-                break
-        outcomes = _evaluate_outcomes(signals)
+    ) -> Response:
+        signals = _merged_signals(limit=limit)
+        outcomes = _refresh_outcomes(signals)
         for sig in signals:
             sig.update(outcomes.get(sig["id"], {
                 "status": "OPEN", "close_ts": None,
                 "close_price": None, "r": None,
             }))
-        return JSONResponse({"signals": signals, "count": len(signals)})
+        return _gzip_response(
+            request, {"signals": signals, "count": len(signals)})
+
+    @app.get("/api/candles")
+    def api_candles(
+        request: Request,
+        limit: int = Query(200, ge=1, le=1000),
+    ) -> Response:
+        """Recent M15 candles for the chart, oldest first:
+        epoch/open/high/low/close. Reuses the cached _candles_m15 feed
+        fetch (60s TTL)."""
+        rows = _candles_m15()
+        candles = [
+            {"epoch": int(r["time"]), "open": float(r["open"]),
+             "high": float(r["high"]), "low": float(r["low"]),
+             "close": float(r["close"])}
+            for r in rows[-limit:]
+        ]
+        return _gzip_response(
+            request,
+            {"symbol": "XAUUSD", "timeframe": "M15",
+             "candles": candles, "count": len(candles)})
+
+    @app.get("/api/config")
+    def api_config(request: Request) -> Response:
+        """Read-only connection + strategy params for the dashboard.
+        No secrets, keys or tokens are ever included here."""
+        news_cfg = getattr(cfg, "news", None)
+        risk_cfg = getattr(cfg, "risk", None)
+        sig_cfg = getattr(cfg, "signals", None)
+        session_cfg = getattr(cfg, "session_hours", None)
+        return _gzip_response(
+            request,
+            {
+                "mode": cfg.mode,
+                "feed": getattr(sig_cfg, "feed", "auto"),
+                "live_feed": _feed_block().get("name"),
+                "symbols": list(cfg.symbols),
+                "timeframes": list(cfg.timeframes),
+                "timeframe": cfg.timeframes[0] if cfg.timeframes else None,
+                "scan_interval_minutes": int(
+                    getattr(getattr(cfg, "schedule", None),
+                            "scan_interval_minutes", 15) or 15
+                ),
+                "session_hours": {
+                    "start": getattr(session_cfg, "start", None),
+                    "end": getattr(session_cfg, "end", None),
+                    "timezone": getattr(session_cfg, "timezone", "UTC"),
+                    "skip_weekends": bool(
+                        getattr(session_cfg, "skip_weekends", True)),
+                },
+                "kill_zones": list(cfg.kill_zones),
+                "news": {
+                    "enabled": bool(getattr(news_cfg, "enabled", True)),
+                    "window_minutes": int(
+                        getattr(news_cfg, "window_minutes", 30) or 30),
+                    "min_impact": getattr(news_cfg, "min_impact", "High"),
+                    "currencies": list(
+                        getattr(news_cfg, "currencies", ["USD"])),
+                },
+                "risk": {
+                    "max_risk_pct_per_trade": float(
+                        getattr(risk_cfg, "max_risk_pct_per_trade", 1.0)),
+                    "max_daily_loss_pct": float(
+                        getattr(risk_cfg, "max_daily_loss_pct", 3.0)),
+                    "max_trades_per_day": int(
+                        getattr(risk_cfg, "max_trades_per_day", 5)),
+                    "min_confidence": float(
+                        getattr(risk_cfg, "min_confidence", 0.6)),
+                    "default_playbook": getattr(
+                        risk_cfg, "default_playbook",
+                        "sweep_fvg_reclaim"),
+                    "breakeven_enabled": bool(
+                        getattr(risk_cfg, "breakeven_enabled", True)),
+                    "breakeven_at_r": float(
+                        getattr(risk_cfg, "breakeven_at_r", 1.0)),
+                },
+                "signals": {
+                    "hypothetical_balance_usd": float(
+                        getattr(sig_cfg, "hypothetical_balance_usd",
+                                10000.0)),
+                    "max_signals_per_day": int(
+                        getattr(sig_cfg, "max_signals_per_day", 5)),
+                    "telegram_enabled": bool(
+                        getattr(sig_cfg, "telegram_enabled", True)),
+                },
+            })
+
+    @app.post("/explain")
+    def api_explain(payload: ExplainRequest) -> JSONResponse:
+        """Store an AI explanation on a signal record (journal or
+        restored history). The signal itself is untouched."""
+        history: dict[int, dict] = state["history"]
+        target_id: int | None = None
+        if payload.signal_id is not None:
+            target_id = int(payload.signal_id)
+            row = journal.get_decision(target_id)
+            if target_id not in history and (
+                row is None or row.get("action") != "propose"
+                or not row.get("approved")
+            ):
+                raise HTTPException(status_code=404,
+                                    detail="signal not found")
+        else:
+            epoch = int(payload.epoch)  # type: ignore[arg-type]
+            matches = [r for r in history.values() if r["ts"] == epoch]
+            if not matches:
+                rows = journal.list_decisions(limit=1000)
+                matches = [
+                    _enrich_signal(r) for r in rows
+                    if r.get("ts") == epoch
+                    and r.get("action") == "propose" and r.get("approved")
+                ]
+            if not matches:
+                raise HTTPException(status_code=404,
+                                    detail="signal not found")
+            target_id = int(max(matches, key=lambda s: s["id"])["id"])
+        now = int(time.time())
+        rec = history.get(target_id)
+        if rec is None:
+            row = journal.get_decision(target_id)
+            if row is None:
+                raise HTTPException(status_code=404,
+                                    detail="signal not found")
+            rec = _enrich_signal(row)
+            rec.update({"status": "OPEN", "close_ts": None,
+                        "close_price": None, "r": None})
+        rec = dict(rec)
+        rec["explanation"] = payload.explanation
+        rec["explanation_model"] = payload.model
+        rec["explanation_ts"] = now
+        history[target_id] = rec
+        _persist_history([rec])
+        return JSONResponse({
+            "ok": True,
+            "signal_id": target_id,
+            "explanation": payload.explanation,
+            "model": payload.model,
+            "ts": now,
+        })
 
     @app.get("/api/decisions")
     def api_decisions(
+        request: Request,
         limit: int = Query(_DEFAULT_LIMIT, ge=1, le=1000),
         symbol: str | None = None,
-    ) -> JSONResponse:
+    ) -> Response:
         rows = journal.list_decisions(limit=limit, symbol=symbol)
-        return JSONResponse({"decisions": rows, "count": len(rows)})
+        return _gzip_response(
+            request, {"decisions": rows, "count": len(rows)})
 
     @app.post("/api/kill")
     def api_kill() -> JSONResponse:
@@ -589,11 +1013,12 @@ def create_app(
     static_dir.mkdir(parents=True, exist_ok=True)
 
     @app.get("/")
-    def root() -> FileResponse:
+    def root(request: Request) -> Response:
         index = static_dir / "index.html"
         if not index.exists():
             raise HTTPException(status_code=404, detail="dashboard not built")
-        return FileResponse(str(index))
+        return _gzip_bytes_response(
+            request, index.read_bytes(), "text/html")
 
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
