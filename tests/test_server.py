@@ -411,3 +411,18 @@ def test_dashboard_index_has_no_fake_values(fake_app):
     assert "No signals yet" in body
     assert "fonts.css" in body
     assert "tailwind.js" in body
+
+
+def test_material_symbols_rule_sets_icon_font(fake_app):
+    """Regression: icons rendered as literal text on phones because the
+    .material-symbols-outlined rule never set font-family (it came from
+    Google's fonts CSS, which was removed when self-hosting)."""
+    _, client, _, _ = fake_app
+    body = client.get("/").text
+    rule = body.split(".material-symbols-outlined {", 1)[1].split("}", 1)[0]
+    assert "font-family: 'Material Symbols Outlined'" in rule
+    assert "-webkit-font-feature-settings: 'liga'" in rule
+    css = client.get("/static/fonts/fonts.css").text
+    assert "font-family:'Material Symbols Outlined'" in css
+    assert client.get(
+        "/static/fonts/MaterialSymbolsOutlined.woff2").status_code == 200
