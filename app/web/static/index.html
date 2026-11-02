@@ -1,312 +1,890 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Gold Signals — XAUUSD</title>
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" name="viewport"/>
+<title>Gold Signals · XAU/USD Bot</title>
+<!-- Self-hosted fonts: Brave mobile blocks Google Fonts, which made
+     Material Symbols render as literal text. All files are served by
+     the bot itself from /static/fonts/. -->
+<link href="/static/fonts/fonts.css" rel="stylesheet"/>
+<!-- Tailwind Play CDN vendored locally (same build, served by the bot). -->
+<script src="/static/tailwind.js"></script>
+<script id="tailwind-config">
+    tailwind.config = {
+      darkMode: "class",
+      theme: {
+        extend: {
+          "colors": {
+            "surface-container": "#1c2028",
+            "on-tertiary": "#003640",
+            "primary-fixed": "#ffddb8",
+            "primary-fixed-dim": "#ffb95f",
+            "on-primary": "#472a00",
+            "on-surface": "#dfe2ee",
+            "surface-variant": "#31353e",
+            "surface-dim": "#0f131c",
+            "tertiary-fixed": "#acedff",
+            "outline-variant": "#534434",
+            "on-secondary-container": "#00311f",
+            "on-secondary-fixed-variant": "#005236",
+            "error-container": "#93000a",
+            "secondary-fixed-dim": "#4edea3",
+            "surface-bright": "#353942",
+            "on-background": "#dfe2ee",
+            "on-secondary": "#003824",
+            "tertiary-container": "#29c1df",
+            "secondary-container": "#00a572",
+            "surface-container-highest": "#31353e",
+            "surface-tint": "#ffb95f",
+            "surface-container-high": "#262a33",
+            "on-secondary-fixed": "#002113",
+            "on-tertiary-fixed-variant": "#004e5c",
+            "on-tertiary-fixed": "#001f26",
+            "on-primary-container": "#613b00",
+            "secondary-fixed": "#6ffbbe",
+            "background": "#0f131c",
+            "inverse-on-surface": "#2c3039",
+            "on-error-container": "#ffdad6",
+            "on-tertiary-container": "#004b58",
+            "on-primary-fixed": "#2a1700",
+            "surface-container-low": "#181c24",
+            "tertiary": "#54ddfc",
+            "inverse-primary": "#855300",
+            "surface-container-lowest": "#0a0e16",
+            "secondary": "#4edea3",
+            "outline": "#a08e7a",
+            "on-surface-variant": "#d8c3ad",
+            "tertiary-fixed-dim": "#4cd7f6",
+            "inverse-surface": "#dfe2ee",
+            "on-primary-fixed-variant": "#653e00",
+            "error": "#ffb4ab",
+            "on-error": "#690005",
+            "surface": "#0f131c",
+            "primary-container": "#f59e0b",
+            "primary": "#ffc174"
+          },
+          "borderRadius": {
+            "DEFAULT": "0.125rem",
+            "lg": "0.25rem",
+            "xl": "0.5rem",
+            "full": "0.75rem"
+          },
+          "spacing": {
+            "space-sm": "0.5rem",
+            "space-md": "0.75rem",
+            "margin-desktop": "1.5rem",
+            "space-xs": "0.25rem",
+            "gutter": "0.5rem",
+            "space-lg": "1rem",
+            "space-xl": "1.5rem",
+            "gutter-desktop": "1rem",
+            "margin": "0.75rem"
+          },
+          "fontFamily": {
+            "label-md": ["JetBrains Mono"],
+            "headline-md": ["Space Grotesk"],
+            "body-lg": ["Inter"],
+            "ticker-md": ["JetBrains Mono"],
+            "headline-xl": ["Space Grotesk"],
+            "ticker-lg": ["JetBrains Mono"],
+            "ticker-xl": ["JetBrains Mono"],
+            "headline-lg": ["Space Grotesk"],
+            "body-md": ["Inter"],
+            "label-sm": ["JetBrains Mono"],
+            "body-sm": ["Inter"]
+          },
+          "fontSize": {
+            "label-md": ["12px", { "lineHeight": "16px", "letterSpacing": "0.04em", "fontWeight": "500" }],
+            "headline-md": ["18px", { "lineHeight": "24px", "letterSpacing": "-0.01em", "fontWeight": "600" }],
+            "body-lg": ["15px", { "lineHeight": "22px", "letterSpacing": "0em", "fontWeight": "500" }],
+            "ticker-md": ["14px", { "lineHeight": "18px", "letterSpacing": "-0.01em", "fontWeight": "500" }],
+            "headline-xl": ["32px", { "lineHeight": "38px", "letterSpacing": "-0.02em", "fontWeight": "700" }],
+            "ticker-lg": ["20px", { "lineHeight": "24px", "letterSpacing": "-0.02em", "fontWeight": "600" }],
+            "ticker-xl": ["28px", { "lineHeight": "32px", "letterSpacing": "-0.03em", "fontWeight": "700" }],
+            "headline-lg": ["24px", { "lineHeight": "30px", "letterSpacing": "-0.015em", "fontWeight": "600" }],
+            "body-md": ["13px", { "lineHeight": "18px", "letterSpacing": "0em", "fontWeight": "400" }],
+            "label-sm": ["10px", { "lineHeight": "12px", "letterSpacing": "0.06em", "fontWeight": "600" }],
+            "body-sm": ["11px", { "lineHeight": "16px", "letterSpacing": "0.01em", "fontWeight": "400" }]
+          }
+        }
+      }
+    }
+  </script>
 <style>
-  :root {
-    --bg: #0e1116;
-    --panel: #161b22;
-    --panel-2: #1c232c;
-    --border: #2a313a;
-    --text: #e6edf3;
-    --muted: #8b949e;
-    --accent: #58a6ff;
-    --green: #3fb950;
-    --red: #f85149;
-    --orange: #d29922;
-  }
-  * { box-sizing: border-box; }
-  html, body {
-    margin: 0; padding: 0; background: var(--bg); color: var(--text);
-    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    font-size: 14px;
-  }
-  header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--border);
-    position: sticky; top: 0; z-index: 10;
-  }
-  header h1 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: 0.3px; }
-  header .meta { color: var(--muted); font-size: 12px; margin-left: 8px; }
-  .toolbar { display: flex; gap: 8px; align-items: center; }
-  button {
-    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
-    padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 13px;
-    font-family: inherit;
-  }
-  button:hover { background: #232a33; }
-  button.danger { color: var(--red); border-color: #4a2a2a; }
-  button.danger:hover { background: #2a1a1a; }
-  button.success { color: var(--green); border-color: #2a4a2e; }
-  button.success:hover { background: #1a2a1d; }
-  .kill-banner {
-    display: none;
-    background: var(--red); color: white; padding: 10px 20px; font-weight: 600;
-    text-align: center;
-  }
-  .kill-banner.active { display: block; }
-  main {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
-    padding: 20px; max-width: 1100px; margin: 0 auto;
-  }
-  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
-  .card {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-    padding: 16px;
-  }
-  .card h2 { margin: 0 0 12px 0; font-size: 13px; text-transform: uppercase;
-              letter-spacing: 0.5px; color: var(--muted); }
-  .wide { grid-column: 1 / -1; }
-  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 24px; }
-  .kv { display: flex; justify-content: space-between; padding: 4px 0;
-        border-bottom: 1px dashed #21272e; }
-  .kv:last-child { border-bottom: none; }
-  .kv .k { color: var(--muted); }
-  .kv .v { font-variant-numeric: tabular-nums; }
-  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px;
-          font-size: 11px; font-weight: 600; }
-  .pill.live { background: #1a3a1d; color: var(--green); }
-  .pill.dead { background: #3a3a3a; color: var(--muted); }
-  .pill.kill { background: var(--red); color: white; }
-  .pill.buy { background: #1a3a1d; color: var(--green); }
-  .pill.sell { background: #4a2a2a; color: var(--red); }
-  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-weight: 500; font-size: 11px;
-        text-transform: uppercase; letter-spacing: 0.5px; }
-  td.num { text-align: right; }
-  tr.disapproved td { color: var(--muted); }
-  .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
-  .links a { color: var(--accent); text-decoration: none; margin-right: 12px; }
-  .links a:hover { text-decoration: underline; }
-  footer { padding: 12px 20px; color: var(--muted); font-size: 11px;
-           text-align: center; border-top: 1px solid var(--border); }
-  .signal-big { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
-  .signal-big .buy { color: var(--green); }
-  .signal-big .sell { color: var(--red); }
-</style>
-</head>
-<body>
-<header>
-  <div>
-    <h1>Gold Signals — XAUUSD</h1>
-    <span class="meta" id="ts">—</span>
-    <span class="meta" id="feed-pill"></span>
-  </div>
-  <div class="toolbar">
-    <button id="refresh" type="button">Refresh</button>
-    <button id="resume" class="success" type="button">Resume</button>
-    <button id="kill" class="danger" type="button">Kill Switch</button>
-  </div>
+    .material-symbols-outlined {
+      font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+      display: inline-block;
+      vertical-align: middle;
+      line-height: 1;
+    }
+    /* Flashing animations */
+    @keyframes tickUpFlash {
+      0% { background-color: rgba(78, 222, 163, 0.25); }
+      100% { background-color: transparent; }
+    }
+    @keyframes tickDownFlash {
+      0% { background-color: rgba(239, 68, 68, 0.25); }
+      100% { background-color: transparent; }
+    }
+    .flash-up { animation: tickUpFlash 0.3s ease-out; }
+    .flash-down { animation: tickDownFlash 0.3s ease-out; }
+
+    /* Custom tactical scrollbar */
+    ::-webkit-scrollbar { width: 3px; height: 3px; }
+    ::-webkit-scrollbar-track { background: #0a0e16; }
+    ::-webkit-scrollbar-thumb { background: #31353e; border-radius: 1px; }
+  </style>
+<style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+  </head>
+<body class="bg-background text-on-surface antialiased font-body-md select-none pb-24 overflow-x-hidden min-h-screen">
+<!-- TOP APP BAR -->
+<header class="bg-surface-container-lowest dark:bg-surface-container-lowest text-primary dark:text-primary docked full-width top-0 border-b border-surface-variant dark:border-surface-variant flex justify-between items-center w-full px-space-md py-space-sm max-w-full sticky z-40">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-primary text-xl">candlestick_chart</span>
+<span class="text-headline-md font-headline-md font-semibold text-primary dark:text-primary tracking-tight">XAU/USD BOT</span>
+</div>
+<div class="flex items-center gap-3">
+<div class="flex items-center gap-1.5 bg-surface-container-low px-2 py-1 rounded border border-surface-variant">
+<span class="relative flex h-2 w-2">
+<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-secondary opacity-75"></span>
+<span class="relative inline-flex rounded-full h-2 w-2 bg-secondary"></span>
+</span>
+<span class="font-label-sm text-label-sm text-secondary" id="feed-latency-display">—</span>
+</div>
+<button class="text-primary hover:text-primary-fixed dark:hover:text-primary-fixed active:opacity-80 transition-opacity duration-150 flex items-center">
+<span class="material-symbols-outlined text-lg">sensors</span>
+</button>
+</div>
 </header>
-<div id="banner" class="kill-banner">KILL SWITCH ENGAGED — NO NEW SIGNALS</div>
-<main>
-  <section class="card" id="feed">
-    <h2>Feed</h2>
-    <div id="feed-content"><div class="empty">Loading…</div></div>
-  </section>
-  <section class="card" id="today">
-    <h2>Today</h2>
-    <div id="today-content"><div class="empty">Loading…</div></div>
-  </section>
-  <section class="card wide" id="last-signal">
-    <h2>Last Signal</h2>
-    <div id="last-signal-content"><div class="empty">No signal yet.</div></div>
-  </section>
-  <section class="card wide" id="signals">
-    <h2>Signals</h2>
-    <div id="signals-content"><div class="empty">Loading…</div></div>
-    <div class="links" style="margin-top: 8px;">
-      <a href="/health" target="_blank">/health</a>
-      <a href="/api/state" target="_blank">/api/state</a>
-      <a href="/api/signals" target="_blank">/api/signals</a>
-      <a href="/api/decisions" target="_blank">/api/decisions</a>
-    </div>
-  </section>
-  <section class="card wide" id="decisions">
-    <h2>Recent Decisions</h2>
-    <div id="decisions-content"><div class="empty">Loading…</div></div>
-  </section>
+<!-- MAIN VIEWPORT CONTAINER -->
+<main class="w-full max-w-md mx-auto px-space-md pt-space-sm space-y-space-md">
+<!-- 1. SYSTEM HEALTH BAR & MASTER KILL SWITCH -->
+<section class="bg-surface-container-low border border-surface-variant rounded-lg p-space-sm space-y-space-sm shadow-sm">
+<div class="flex items-center justify-between font-label-sm text-label-sm">
+<div class="flex items-center gap-1.5">
+<span class="inline-block w-1.5 h-1.5 rounded-full bg-secondary"></span>
+<span class="text-on-surface-variant">PROCESS:</span>
+<span class="text-secondary font-semibold">RUNNING</span>
+<span class="text-outline text-[9px]" id="uptime-display"></span>
+</div>
+<div class="flex items-center gap-1 text-on-surface-variant">
+<span id="feed-label">FEED:</span>
+<span class="text-secondary font-semibold" id="socket-status">—</span>
+</div>
+</div>
+<!-- Staleness Monitor Dynamic Banner -->
+<div class="flex items-center justify-between px-2 py-1 rounded bg-surface-container-lowest border border-surface-variant text-label-sm font-label-sm transition-colors duration-200" id="stale-banner">
+<div class="flex items-center gap-1.5">
+<span class="material-symbols-outlined text-[13px] text-secondary">check_circle</span>
+<span class="text-on-surface-variant">Data Stream Telemetry:</span>
+</div>
+<div class="flex items-center gap-1">
+<span class="text-outline">Heartbeat:</span>
+<span class="text-secondary font-mono font-bold" id="freshness-timer">—</span>
+<span class="text-outline">(Limit &lt; 2.0s)</span>
+</div>
+</div>
+<!-- Master Bot Kill Switch Toggle -->
+<div class="pt-0.5">
+<button class="w-full min-h-[44px] flex items-center justify-between px-space-md py-2 rounded bg-surface-container-high border border-secondary transition-all active:scale-[0.99]" id="kill-switch-btn" aria-label="Master kill switch">
+<div class="flex items-center gap-2 text-left">
+<span class="material-symbols-outlined text-secondary text-xl" id="kill-icon">power_settings_new</span>
+<div>
+<div class="font-ticker-md text-ticker-md text-secondary font-bold leading-tight" id="kill-state-title">BOT ACTIVE - BROADCASTING SIGNALS</div>
+<div class="text-label-sm font-label-sm text-outline" id="kill-state-sub">Tap to emergency pause automated alerts</div>
+</div>
+</div>
+<div class="px-2 py-0.5 rounded bg-secondary-container/40 border border-secondary text-secondary font-label-sm text-label-sm" id="kill-badge">
+            PAUSE
+          </div>
+</button>
+</div>
+</section>
+<!-- 2. LIVE GOLD PRICE MONITOR (Hero Instrument Card) -->
+<section class="bg-surface-container-low border border-surface-variant rounded-lg p-space-md relative overflow-hidden" id="section-monitor">
+<!-- Glow ambient accent -->
+<div class="absolute -right-8 -top-8 w-28 h-28 bg-primary-container/10 rounded-full blur-2xl pointer-events-none"></div>
+<div class="flex items-center justify-between mb-space-xs">
+<div class="flex items-center gap-1.5">
+<div class="w-5 h-5 rounded-full bg-primary-container/20 border border-primary-container flex items-center justify-center">
+<span class="font-label-sm text-[10px] text-primary font-bold">Au</span>
+</div>
+<h2 class="font-headline-md text-headline-md text-on-surface tracking-tight font-bold">XAU/USD</h2>
+<span class="text-label-sm font-label-sm text-primary px-1.5 py-0.5 rounded bg-surface-container-lowest border border-outline-variant">SPOT GOLD</span>
+</div>
+<div class="text-right">
+<div class="text-label-sm font-label-sm text-outline" id="feed-source-label">—</div>
+<div class="text-label-sm font-label-sm text-on-surface-variant flex items-center justify-end gap-1">
+<span class="inline-block w-1.5 h-1.5 rounded-full bg-secondary animate-pulse"></span>
+<span>Tick: <span class="text-on-surface" id="tick-latency-hero">—</span></span>
+</div>
+</div>
+</div>
+<!-- Live Price Display with Tick Flash -->
+<div class="my-2 p-2 rounded bg-surface-container-lowest border border-surface-variant transition-colors flex items-baseline justify-between" id="price-container">
+<div>
+<span class="text-label-sm font-label-sm text-outline block">CURRENT SPOT</span>
+<div class="flex items-baseline gap-2">
+<span class="font-ticker-xl text-ticker-xl text-primary font-bold tracking-tight" id="live-gold-price">—</span>
+<span class="text-secondary font-ticker-md text-ticker-md flex items-center font-bold" id="price-change-pill">—</span>
+</div>
+</div>
+<div class="text-right">
+<span class="text-label-sm font-label-sm text-outline block">SPREAD</span>
+<span class="font-ticker-md text-ticker-md text-primary font-bold" id="live-spread-val">—</span>
+</div>
+</div>
+<!-- Bid / Ask Split Matrix -->
+<div class="grid grid-cols-2 gap-2 my-space-xs">
+<div class="bg-surface-container-lowest border border-surface-variant rounded p-2 text-left">
+<div class="flex justify-between items-center text-label-sm font-label-sm text-outline mb-0.5">
+<span>BID</span>
+<span class="text-[9px] text-on-surface-variant">SELL LIQUIDITY</span>
+</div>
+<div class="font-ticker-lg text-ticker-lg text-on-surface font-semibold" id="bid-price">—</div>
+</div>
+<div class="bg-surface-container-lowest border border-surface-variant rounded p-2 text-left">
+<div class="flex justify-between items-center text-label-sm font-label-sm text-outline mb-0.5">
+<span>ASK</span>
+<span class="text-[9px] text-on-surface-variant">BUY LIQUIDITY</span>
+</div>
+<div class="font-ticker-lg text-ticker-lg text-on-surface font-semibold" id="ask-price">—</div>
+</div>
+</div>
+<!-- Day Range Bar -->
+<div class="mt-3 pt-2 border-t border-surface-variant font-label-sm text-label-sm space-y-1">
+<div class="flex justify-between text-outline">
+<span>DAY LOW: <strong class="text-on-surface font-mono" id="day-low-val">—</strong></span>
+<span>RANGE: <strong class="text-primary font-mono" id="day-range-val">—</strong></span>
+<span>DAY HIGH: <strong class="text-on-surface font-mono" id="day-high-val">—</strong></span>
+</div>
+<div class="w-full bg-surface-container-lowest h-1.5 rounded-full overflow-hidden flex border border-surface-variant">
+<div class="bg-gradient-to-r from-error/70 via-primary-container to-secondary h-full rounded-full" id="range-bar-fill" style="width: 0%;"></div>
+</div>
+</div>
+</section>
+<!-- 3. NEWS BLACKOUT & HIGH-IMPACT CALENDAR WARNING -->
+<section class="bg-surface-container-low border border-surface-variant rounded-lg p-space-sm space-y-2" id="section-news">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-1.5">
+<span class="material-symbols-outlined text-secondary text-sm" id="news-icon">verified_user</span>
+<span class="font-label-sm text-label-sm font-bold text-secondary" id="news-status-title">SAFE TRADING WINDOW ACTIVE</span>
+</div>
+<span class="text-label-sm font-label-sm text-on-surface-variant bg-surface-container-lowest px-1.5 py-0.5 rounded border border-surface-variant" id="news-status-badge">
+          NO ACTIVE BLACKOUT
+        </span>
+</div>
+<div id="news-event-card">
+<div class="bg-surface-container-lowest border border-surface-variant rounded p-2 flex items-start gap-2.5">
+<span class="material-symbols-outlined text-primary text-lg mt-0.5">event_upcoming</span>
+<div class="w-full">
+<div class="flex justify-between items-center">
+<span class="font-headline-md text-sm font-bold text-on-surface">Loading calendar…</span>
+</div>
+</div>
+</div>
+</div>
+</section>
+<!-- 4. LATEST SIGNAL HERO CARD -->
+<div id="section-latest-signal"></div>
+<!-- 5. SEGMENTED NAVIGATION TABS -->
+<div class="grid grid-cols-2 gap-1 p-1 bg-surface-container-lowest border border-surface-variant rounded-lg">
+<button class="min-h-[44px] flex items-center justify-center gap-1.5 rounded text-ticker-md font-ticker-md font-semibold bg-surface-container-high text-primary border border-surface-variant transition-all" id="tab-btn-history" onclick="switchView('history')">
+<span class="material-symbols-outlined text-sm">history</span>
+<span>Signal History</span>
+</button>
+<button class="min-h-[44px] flex items-center justify-center gap-1.5 rounded text-ticker-md font-ticker-md font-semibold text-outline hover:text-on-surface transition-all" id="tab-btn-logs" onclick="switchView('logs')">
+<span class="material-symbols-outlined text-sm">terminal</span>
+<span>Decisions Log</span>
+</button>
+</div>
+<!-- 6. TAB 1 CONTENT - SIGNAL HISTORY -->
+<div class="space-y-space-sm" id="view-history">
+<!-- Performance Summary Metric Bar -->
+<div class="grid grid-cols-3 gap-2 bg-surface-container-low border border-surface-variant p-2.5 rounded-lg text-center font-label-sm text-label-sm">
+<div>
+<span class="text-outline text-[10px] block">WIN RATE</span>
+<span class="font-ticker-lg text-ticker-lg text-secondary font-bold" id="stat-winrate">0%</span>
+<span class="text-[9px] text-outline" id="stat-winloss">0W / 0L</span>
+</div>
+<div class="border-x border-surface-variant px-1">
+<span class="text-outline text-[10px] block">TOTAL SIGNALS</span>
+<span class="font-ticker-lg text-ticker-lg text-on-surface font-bold" id="stat-total">0</span>
+<span class="text-[9px] text-outline">Signals only</span>
+</div>
+<div>
+<span class="text-outline text-[10px] block">NET YIELD</span>
+<span class="font-ticker-lg text-ticker-lg text-primary font-bold" id="stat-netr">+0.0 R</span>
+<span class="text-[9px] text-secondary font-mono" id="stat-netusd">+$0.00</span>
+</div>
+</div>
+<!-- Signals Feed List -->
+<div class="space-y-2" id="history-list">
+<div class="bg-surface-container-low border border-surface-variant rounded-lg p-2.5 text-center text-label-sm font-label-sm text-outline">
+No signals yet — the bot is watching the market. New setups will appear here.
+</div>
+</div>
+</div>
+<!-- 7. TAB 2 CONTENT - DECISIONS LOG (Bot Scan Evaluator) -->
+<div class="space-y-2 hidden" id="view-logs">
+<div class="bg-surface-container-low border border-surface-variant p-2 rounded font-label-sm text-label-sm text-on-surface-variant flex items-center justify-between">
+<span id="scan-interval-label">Continuous Engine Cycle</span>
+<span class="text-secondary flex items-center gap-1">
+<span class="inline-block w-1.5 h-1.5 rounded-full bg-secondary animate-ping"></span> Live Evaluating
+        </span>
+</div>
+<div class="space-y-2" id="decisions-list">
+<div class="bg-surface-container-low border border-surface-variant rounded-lg p-2.5 text-center text-label-sm font-label-sm text-outline">
+No decisions logged yet.
+</div>
+</div>
+</div>
 </main>
-<footer>
-  <span>Signals only — no trades are placed by this bot · Auto-refresh every 10s</span>
-</footer>
+<!-- BOTTOM NAVBAR -->
+<nav class="bg-surface-container-lowest dark:bg-surface-container-lowest text-primary dark:text-primary docked full-width bottom-0 fixed bottom-0 left-0 w-full z-50 flex justify-around items-center px-space-xs py-space-xs border-t-0 shadow-lg">
+<a class="flex flex-col items-center justify-center text-primary dark:text-primary font-label-sm text-label-sm py-space-xs min-h-[44px] min-w-[64px]" href="#section-monitor" id="nav-monitor">
+<span class="material-symbols-outlined text-xl">monitoring</span>
+<span>Monitor</span>
+</a>
+<a class="flex flex-col items-center justify-center text-outline dark:text-outline font-label-sm text-label-sm py-space-xs min-h-[44px] min-w-[64px] hover:text-on-surface dark:hover:text-on-surface active:scale-95 transition-transform duration-100" href="#view-history" id="nav-signals">
+<span class="material-symbols-outlined text-xl">analytics</span>
+<span>Signals</span>
+</a>
+<a class="flex flex-col items-center justify-center text-outline dark:text-outline font-label-sm text-label-sm py-space-xs min-h-[44px] min-w-[64px] hover:text-on-surface dark:hover:text-on-surface active:scale-95 transition-transform duration-100" href="#view-logs" id="nav-filters">
+<span class="material-symbols-outlined text-xl">rule</span>
+<span>Filters</span>
+</a>
+<a class="flex flex-col items-center justify-center text-outline dark:text-outline font-label-sm text-label-sm py-space-xs min-h-[44px] min-w-[64px] hover:text-on-surface dark:hover:text-on-surface active:scale-95 transition-transform duration-100" href="#section-news" id="nav-calendar">
+<span class="material-symbols-outlined text-xl">event_note</span>
+<span>Calendar</span>
+</a>
+</nav>
+
+<!-- Live-data engine: every value on this page comes from the bot's own
+     API. Nothing here is simulated — price, signals, decisions, news
+     and kill-switch state are all fetched live. -->
 <script>
-const REFRESH_MS = 10000;
-const fmt = (v, d = 2) => (v === null || v === undefined) ? "—" :
-  Number(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
-const fmtInt = (v) => (v === null || v === undefined) ? "—" : Number(v).toLocaleString();
-const ts = (s) => {
-  if (!s) return "—";
-  const d = new Date(s * 1000);
-  return d.toLocaleString();
-};
-const ageLabel = (secs) => {
-  if (secs === null || secs === undefined) return "—";
-  if (secs < 60) return secs + "s ago";
-  if (secs < 3600) return Math.floor(secs / 60) + "m ago";
-  return Math.floor(secs / 3600) + "h ago";
-};
+    // ---------- helpers ----------
+    const $ = (id) => document.getElementById(id);
+    const fmt = (v, d) => (v == null || isNaN(v)) ? '—' : Number(v).toLocaleString('en-US', { minimumFractionDigits: d == null ? 2 : d, maximumFractionDigits: d == null ? 2 : d });
+    const fmtMoney = (v, d) => {
+      if (v == null || isNaN(v)) return '—';
+      const sign = v < 0 ? '-$' : '+$';
+      return sign + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: d == null ? 2 : d, maximumFractionDigits: d == null ? 2 : d });
+    };
+    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const pad2 = (n) => String(n).padStart(2, '0');
+    function utcHMS(ts) {
+      const d = new Date(ts * 1000);
+      return pad2(d.getUTCHours()) + ':' + pad2(d.getUTCMinutes()) + ':' + pad2(d.getUTCSeconds());
+    }
+    function utcHM(iso) {
+      const d = new Date(iso);
+      return pad2(d.getUTCHours()) + ':' + pad2(d.getUTCMinutes());
+    }
+    function dayLabel(ts) {
+      const d = new Date(ts * 1000);
+      const now = new Date();
+      const sameDay = d.getUTCFullYear() === now.getUTCFullYear() && d.getUTCMonth() === now.getUTCMonth() && d.getUTCDate() === now.getUTCDate();
+      if (sameDay) return 'Today, ' + utcHMS(ts) + ' UTC';
+      return d.getUTCDate() + ' ' + ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()] + ', ' + utcHMS(ts) + ' UTC';
+    }
+    function ago(ts) {
+      const s = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+      if (s < 60) return 'just now';
+      if (s < 3600) return Math.floor(s / 60) + 'm ago';
+      if (s < 86400) return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm ago';
+      return Math.floor(s / 86400) + 'd ago';
+    }
+    function fmtDuration(sec) {
+      sec = Math.max(0, Math.floor(sec));
+      if (sec < 60) return sec + 's';
+      if (sec < 3600) return Math.floor(sec / 60) + 'm';
+      return Math.floor(sec / 3600) + 'h ' + pad2(Math.floor((sec % 3600) / 60)) + 'm';
+    }
+    function fmtUptime(sec) {
+      sec = Math.max(0, Math.floor(sec));
+      if (sec < 60) return sec + 's';
+      if (sec < 3600) return Math.floor(sec / 60) + 'm ' + pad2(sec % 60) + 's';
+      if (sec < 86400) return Math.floor(sec / 3600) + 'h ' + pad2(Math.floor((sec % 3600) / 60)) + 'm';
+      return Math.floor(sec / 86400) + 'd ' + Math.floor((sec % 86400) / 3600) + 'h';
+    }
+    function fmtIn(minutes) {
+      minutes = Math.max(0, Math.round(minutes));
+      if (minutes < 60) return minutes + 'm';
+      return Math.floor(minutes / 60) + 'h ' + pad2(minutes % 60) + 'm';
+    }
+    function readableReason(r) {
+      const s = String(r).replace(/_/g, ' ');
+      return s.charAt(0).toUpperCase() + s.slice(1);
+    }
 
-async function getJSON(url) {
-  const r = await fetch(url, { cache: "no-store" });
-  if (!r.ok) throw new Error(`${url} -> ${r.status}`);
-  return await r.json();
-}
-async function postJSON(url) {
-  const r = await fetch(url, { method: "POST" });
-  if (!r.ok) throw new Error(`${url} -> ${r.status}`);
-  return await r.json();
-}
+    // ---------- live state ----------
+    let lastTickMs = null;
+    let lastPrice = null;
+    let killEngaged = false;
+    let killPending = false;
+    let latestSignal = null;
+    let latestSignalId = null;
+    let signalsCache = [];
+    const pageLoadedAt = Date.now();
 
-function renderFeed(feed) {
-  document.getElementById("ts").textContent = new Date().toLocaleString();
-  const pill = document.getElementById("feed-pill");
-  pill.innerHTML = feed.feed_ok
-    ? `<span class="pill live">feed ${feed.name || "?"} live</span>`
-    : `<span class="pill dead">feed ${feed.name || "?"} down</span>`;
-  const html = `
-    <div class="grid-2">
-      <div class="kv"><span class="k">Source</span><span class="v">${feed.name || "—"}</span></div>
-      <div class="kv"><span class="k">Status</span><span class="v">${feed.feed_ok ? "OK" : "DOWN"}</span></div>
-      <div class="kv"><span class="k">Last tick</span><span class="v">${ageLabel(feed.last_tick_age_s)}</span></div>
-      <div class="kv"><span class="k">Ticks seen</span><span class="v">${fmtInt(feed.tick_count)}</span></div>
-    </div>
-    ${feed.last_error ? `<div style="color: var(--orange); margin-top: 8px; font-size: 12px;">${feed.last_error}</div>` : ""}`;
-  document.getElementById("feed-content").innerHTML = html;
-}
+    // ---------- price / state ----------
+    function applyState(s) {
+      $('uptime-display').textContent = (s.uptime_s != null) ? '(UP ' + fmtUptime(s.uptime_s) + ')' : '';
+      const fname = (s.feed && s.feed.name) ? String(s.feed.name) : null;
+      const feedOk = !!(s.feed && s.feed.feed_ok);
+      $('feed-label').textContent = fname ? fname.toUpperCase() + ':' : 'FEED:';
+      const sock = $('socket-status');
+      sock.textContent = feedOk ? 'ONLINE' : 'OFFLINE';
+      sock.className = feedOk ? 'text-secondary font-semibold' : 'text-error font-semibold';
+      $('feed-source-label').textContent = fname === 'deriv' ? 'Deriv Live WebSocket'
+        : fname === 'oanda' ? 'OANDA Live REST'
+        : 'Feed offline';
+      if (s.scan_interval_minutes != null) {
+        $('scan-interval-label').textContent = 'Continuous Engine Cycle (' + s.scan_interval_minutes + 'm scans)';
+      }
+      const p = s.price || {};
+      if (p.mid != null) {
+        const prev = lastPrice;
+        lastPrice = p.mid;
+        $('live-gold-price').textContent = '$' + fmt(p.mid);
+        $('bid-price').textContent = fmt(p.bid);
+        $('ask-price').textContent = fmt(p.ask);
+        $('live-spread-val').textContent = (p.spread_pips != null) ? p.spread_pips.toFixed(1) + ' pips' : '—';
+        if (p.ts != null) lastTickMs = p.ts * 1000;
+        const box = $('price-container');
+        if (prev != null && p.mid !== prev) {
+          box.classList.remove('flash-up', 'flash-down');
+          void box.offsetWidth;
+          box.classList.add(p.mid >= prev ? 'flash-up' : 'flash-down');
+        }
+        updateHeroLive();
+      }
+      const d = s.day;
+      const pill = $('price-change-pill');
+      if (d) {
+        $('day-low-val').textContent = fmt(d.low);
+        $('day-high-val').textContent = fmt(d.high);
+        $('day-range-val').textContent = fmt(d.high - d.low) + ' USD';
+        const span = d.high - d.low;
+        const pos = span > 0 ? Math.min(1, Math.max(0, (d.last_close - d.low) / span)) : 0;
+        $('range-bar-fill').style.width = (pos * 100).toFixed(1) + '%';
+        if (d.change != null) {
+          const up = d.change >= 0;
+          pill.className = 'font-ticker-md text-ticker-md flex items-center font-bold ' + (up ? 'text-secondary' : 'text-error');
+          pill.innerHTML = '<span class="material-symbols-outlined text-sm">' + (up ? 'arrow_drop_up' : 'arrow_drop_down') + '</span>' + fmtMoney(d.change) + ' (' + (up ? '+' : '') + d.change_pct.toFixed(2) + '%)';
+        } else {
+          pill.textContent = '—';
+        }
+      } else {
+        $('day-low-val').textContent = '—';
+        $('day-high-val').textContent = '—';
+        $('day-range-val').textContent = '—';
+        $('range-bar-fill').style.width = '0%';
+        pill.textContent = '—';
+      }
+      renderNews(s.news);
+      if (!killPending) setKill(!!s.kill_switch);
+    }
 
-function renderToday(today) {
-  const html = `
-    <div class="grid-2">
-      <div class="kv"><span class="k">Decisions</span><span class="v">${fmtInt(today.decision_count)}</span></div>
-      <div class="kv"><span class="k">Signals sent</span><span class="v">${fmtInt(today.signals)}</span></div>
-      <div class="kv"><span class="k">Approved</span><span class="v">${fmtInt(today.approved)}</span></div>
-      <div class="kv"><span class="k">Rejected</span><span class="v">${fmtInt(today.rejected)}</span></div>
-    </div>`;
-  document.getElementById("today-content").innerHTML = html;
-}
+    async function fetchState() {
+      try {
+        const r = await fetch('/api/state');
+        if (!r.ok) return;
+        applyState(await r.json());
+      } catch (e) { /* keep last values; staleness banner grows */ }
+    }
 
-function signalHeadline(s) {
-  const dir = (s.direction || "").toLowerCase();
-  const cls = dir === "buy" ? "buy" : "sell";
-  const label = dir === "buy" ? "BUY" : "SELL";
-  return `<div class="signal-big"><span class="${cls}">${label}</span> ${s.symbol || ""} @ ${fmt(s.entry)}</div>`;
-}
+    // ---------- news ----------
+    function renderNews(n) {
+      const icon = $('news-icon');
+      const title = $('news-status-title');
+      const badge = $('news-status-badge');
+      const card = $('news-event-card');
+      const win = (n && n.window_minutes != null) ? n.window_minutes : 30;
+      if (!n || !n.available) {
+        title.textContent = 'CALENDAR UNAVAILABLE';
+        title.className = 'font-label-sm text-label-sm font-bold text-primary';
+        icon.textContent = 'warning';
+        icon.className = 'material-symbols-outlined text-primary text-sm';
+        badge.textContent = 'FEED OFFLINE';
+        card.innerHTML = '<div class="bg-surface-container-lowest border border-surface-variant rounded p-2 flex items-start gap-2.5">'
+          + '<span class="material-symbols-outlined text-primary text-lg mt-0.5">event_upcoming</span>'
+          + '<div class="w-full"><p class="font-body-sm text-body-sm text-on-surface">High-impact calendar could not be loaded. Blackout is fail-open — signals are not blocked by news.</p></div></div>';
+        return;
+      }
+      if (n.blackout_active && n.active_event) {
+        const ev = n.active_event;
+        const endMin = new Date(ev.time_utc).getTime() + win * 60000;
+        title.textContent = 'BLACKOUT ACTIVE';
+        title.className = 'font-label-sm text-label-sm font-bold text-error';
+        icon.textContent = 'warning';
+        icon.className = 'material-symbols-outlined text-error text-sm';
+        badge.textContent = 'SIGNALS PAUSED';
+        card.innerHTML = '<div class="bg-surface-container-lowest border border-error/40 rounded p-2 flex items-start gap-2.5">'
+          + '<span class="material-symbols-outlined text-error text-lg mt-0.5">event_upcoming</span>'
+          + '<div class="w-full"><div class="flex justify-between items-center">'
+          + '<span class="font-headline-md text-sm font-bold text-on-surface">' + esc(ev.title) + '</span>'
+          + '<span class="bg-error/20 text-error border border-error/30 text-[9px] font-label-sm px-1 rounded font-bold">HIGH IMPACT</span></div>'
+          + '<div class="flex justify-between items-center mt-1 font-label-sm text-label-sm text-on-surface-variant">'
+          + '<span>Blackout until: <strong class="text-on-surface">' + utcHM(new Date(endMin).toISOString()) + ' UTC</strong></span>'
+          + '<span class="text-primary">Auto Blackout: ±' + win + 'm</span></div></div></div>';
+        return;
+      }
+      title.textContent = 'SAFE TRADING WINDOW ACTIVE';
+      title.className = 'font-label-sm text-label-sm font-bold text-secondary';
+      icon.textContent = 'verified_user';
+      icon.className = 'material-symbols-outlined text-secondary text-sm';
+      badge.textContent = 'NO ACTIVE BLACKOUT';
+      if (n.next_event) {
+        const ev = n.next_event;
+        card.innerHTML = '<div class="bg-surface-container-lowest border border-surface-variant rounded p-2 flex items-start gap-2.5">'
+          + '<span class="material-symbols-outlined text-primary text-lg mt-0.5">event_upcoming</span>'
+          + '<div class="w-full"><div class="flex justify-between items-center">'
+          + '<span class="font-headline-md text-sm font-bold text-on-surface">' + esc(ev.title) + '</span>'
+          + '<span class="bg-error/20 text-error border border-error/30 text-[9px] font-label-sm px-1 rounded font-bold">HIGH IMPACT</span></div>'
+          + '<div class="flex justify-between items-center mt-1 font-label-sm text-label-sm text-on-surface-variant">'
+          + '<span>Scheduled: <strong class="text-on-surface">' + utcHM(ev.time_utc) + ' UTC</strong> (in ' + fmtIn(ev.minutes_until) + ')</span>'
+          + '<span class="text-primary">Auto Blackout: ±' + win + 'm</span></div></div></div>';
+      } else {
+        card.innerHTML = '<div class="bg-surface-container-lowest border border-surface-variant rounded p-2 flex items-start gap-2.5">'
+          + '<span class="material-symbols-outlined text-primary text-lg mt-0.5">event_upcoming</span>'
+          + '<div class="w-full"><p class="font-body-sm text-body-sm text-on-surface">No high-impact USD events left this week.</p></div></div>';
+      }
+    }
 
-function renderLastSignal(last) {
-  if (!last) {
-    document.getElementById("last-signal-content").innerHTML = '<div class="empty">No signal yet.</div>';
-    return;
-  }
-  document.getElementById("last-signal-content").innerHTML = `
-    ${signalHeadline(last)}
-    <div class="grid-2">
-      <div class="kv"><span class="k">Stop loss</span><span class="v">${fmt(last.stop_loss)}</span></div>
-      <div class="kv"><span class="k">Take profit</span><span class="v">${fmt(last.take_profit)}</span></div>
-      <div class="kv"><span class="k">Risk</span><span class="v">${fmt(last.risk_pct, 1)}%</span></div>
-      <div class="kv"><span class="k">Confidence</span><span class="v">${fmt(last.confidence, 2)}</span></div>
-      <div class="kv"><span class="k">Time</span><span class="v">${ts(last.ts)}</span></div>
-      <div class="kv"><span class="k">Playbook</span><span class="v">${last.playbook || "—"}</span></div>
-    </div>
-    <div style="color: var(--muted); margin-top: 8px; font-size: 12px;">${last.reasoning || ""}</div>`;
-}
+    // ---------- signals ----------
+    function unrealizedR(sig, price) {
+      if (price == null || sig.entry == null || sig.stop_loss == null) return null;
+      const slDist = Math.abs(sig.entry - sig.stop_loss);
+      if (!slDist) return null;
+      const dir = (sig.direction || '').toLowerCase();
+      const move = dir === 'buy' ? price - sig.entry : dir === 'sell' ? sig.entry - price : 0;
+      return move / slDist;
+    }
+    function pricePosition(sig, price) {
+      if (price == null || sig.stop_loss == null || sig.take_profit == null) return null;
+      const dir = (sig.direction || '').toLowerCase();
+      let f = null;
+      if (dir === 'buy') f = (price - sig.stop_loss) / (sig.take_profit - sig.stop_loss);
+      else if (dir === 'sell') f = (sig.stop_loss - price) / (sig.stop_loss - sig.take_profit);
+      if (f == null) return null;
+      return Math.min(1, Math.max(0, f));
+    }
 
-function renderSignals(signals) {
-  if (!signals || !signals.length) {
-    document.getElementById("signals-content").innerHTML = '<div class="empty">No signals yet.</div>';
-    return;
-  }
-  const rows = signals.slice(0, 25).map(s => {
-    const dir = (s.direction || "").toLowerCase();
-    const pill = dir === "buy"
-      ? '<span class="pill buy">BUY</span>' : '<span class="pill sell">SELL</span>';
-    return `<tr>
-      <td>${ts(s.ts)}</td>
-      <td>${s.symbol}</td>
-      <td>${pill}</td>
-      <td class="num">${fmt(s.entry)}</td>
-      <td class="num">${fmt(s.stop_loss)}</td>
-      <td class="num">${fmt(s.take_profit)}</td>
-      <td class="num">${fmt(s.risk_pct, 1)}%</td>
-      <td class="num">${fmt(s.confidence, 2)}</td>
-    </tr>`;
-  }).join("");
-  document.getElementById("signals-content").innerHTML = `
-    <table>
-      <thead><tr>
-        <th>Time</th><th>Symbol</th><th>Side</th>
-        <th class="num">Entry</th><th class="num">SL</th><th class="num">TP</th>
-        <th class="num">Risk</th><th class="num">Conf.</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table>`;
-}
+    function heroHTML(sig) {
+      const isBuy = (sig.direction || '').toLowerCase() === 'buy';
+      const dirColor = isBuy ? 'text-secondary' : 'text-error';
+      const borderColor = isBuy ? 'border-l-secondary' : 'border-l-error';
+      const dirIcon = isBuy ? 'trending_up' : 'trending_down';
+      const dirLabel = isBuy ? 'BUY / LONG' : 'SELL / SHORT';
+      const status = sig.status || 'OPEN';
+      const badge = status === 'TP'
+        ? '<span class="bg-secondary text-on-secondary font-ticker-md text-label-sm px-2 py-0.5 rounded font-bold tracking-wider">HIT TP</span>'
+        : status === 'SL'
+        ? '<span class="bg-error text-on-error font-ticker-md text-label-sm px-2 py-0.5 rounded font-bold tracking-wider">HIT SL</span>'
+        : '<span class="bg-secondary text-on-secondary font-ticker-md text-label-sm px-2 py-0.5 rounded font-bold tracking-wider">OPEN</span>';
+      const slDist = (sig.entry != null && sig.stop_loss != null) ? Math.abs(sig.entry - sig.stop_loss) : null;
+      const tpDist = (sig.entry != null && sig.take_profit != null) ? Math.abs(sig.take_profit - sig.entry) : null;
+      const slPips = slDist != null ? Math.round(slDist / 0.1) : null;
+      const tpPips = tpDist != null ? Math.round(tpDist / 0.1) : null;
+      return '<section class="bg-surface-container-low border-l-4 ' + borderColor + ' border-t border-r border-b border-surface-variant rounded-lg p-space-md space-y-space-sm shadow-lg relative">'
+        + '<div class="flex items-center justify-between"><div class="flex items-center gap-2">' + badge
+        + '<span class="font-headline-md text-headline-md ' + dirColor + ' font-bold flex items-center gap-0.5">'
+        + '<span class="material-symbols-outlined text-lg">' + dirIcon + '</span> ' + dirLabel + '</span></div>'
+        + '<div class="text-label-sm font-label-sm text-outline text-right"><span>' + dayLabel(sig.ts) + '</span>'
+        + '<span class="block text-[10px] text-on-surface-variant">(' + ago(sig.ts) + ')</span></div></div>'
+        + '<div class="grid grid-cols-3 gap-1.5 bg-surface-container-lowest border border-surface-variant p-2 rounded">'
+        + '<div><span class="text-label-sm font-label-sm text-outline block">ENTRY PRICE</span>'
+        + '<span class="font-ticker-md text-ticker-md text-on-surface font-bold">' + fmt(sig.entry) + '</span></div>'
+        + '<div><span class="text-label-sm font-label-sm text-error block">STOP LOSS</span>'
+        + '<span class="font-ticker-md text-ticker-md text-error font-bold">' + fmt(sig.stop_loss) + '</span>'
+        + '<span class="text-[9px] font-mono text-outline block">' + (slPips != null ? '-' + slPips + ' pips (-$' + fmt(slDist) + ')' : '—') + '</span></div>'
+        + '<div><span class="text-label-sm font-label-sm text-secondary block">TAKE PROFIT</span>'
+        + '<span class="font-ticker-md text-ticker-md text-secondary font-bold">' + fmt(sig.take_profit) + '</span>'
+        + '<span class="text-[9px] font-mono text-outline block">' + (tpPips != null ? '+' + tpPips + ' pips (+$' + fmt(tpDist) + ')' : '—') + '</span></div></div>'
+        + '<div class="grid grid-cols-4 gap-1 text-center font-label-sm text-label-sm pt-1 border-t border-surface-variant">'
+        + '<div class="bg-surface-container-high py-1 px-1 rounded"><span class="text-outline text-[9px] block">R:R RATIO</span>'
+        + '<span class="text-primary font-bold">' + (sig.rr != null ? '1 : ' + sig.rr.toFixed(2) : '—') + '</span></div>'
+        + '<div class="bg-surface-container-high py-1 px-1 rounded"><span class="text-outline text-[9px] block">DOLLAR RISK</span>'
+        + '<span class="text-on-surface font-bold">' + fmtMoney(sig.risk_usd) + '</span></div>'
+        + '<div class="bg-surface-container-high py-1 px-1 rounded"><span class="text-outline text-[9px] block">LOT SIZE</span>'
+        + '<span class="text-on-surface font-bold">' + (sig.lots != null ? sig.lots.toFixed(2) + ' Lots' : '—') + '</span></div>'
+        + '<div class="bg-surface-container-high py-1 px-1 rounded"><span class="text-outline text-[9px] block">DELTA / $1</span>'
+        + '<span class="text-on-surface font-bold">' + fmtMoney(sig.per_dollar_usd) + '</span></div></div>'
+        + '<div class="bg-surface-container-lowest border border-surface-variant p-2 rounded space-y-1.5">'
+        + '<div class="flex justify-between items-center"><span class="text-label-sm font-label-sm text-outline" id="pnl-label">' + (status === 'OPEN' ? 'UNREALIZED FLOATING P&amp;L' : 'REALIZED P&amp;L') + '</span>'
+        + '<div class="flex items-center gap-1.5"><span class="font-ticker-md text-ticker-md text-secondary font-bold" id="floating-pnl-val">—</span>'
+        + '<span class="text-label-sm font-label-sm text-secondary bg-secondary-container/30 px-1 py-0.2 rounded font-bold" id="floating-pnl-r">—</span></div></div>'
+        + '<div class="w-full bg-surface-container h-2 rounded-full overflow-hidden flex border border-surface-variant">'
+        + '<div class="bg-secondary h-full rounded-full transition-all duration-300" id="pnl-bar-fill" style="width: 0%;"></div></div>'
+        + '<div class="flex justify-between text-[10px] font-label-sm text-outline">'
+        + '<span>SL: ' + fmt(sig.stop_loss) + '</span>'
+        + '<span class="text-primary font-bold" id="pnl-position-text">—</span>'
+        + '<span>TP: ' + fmt(sig.take_profit) + '</span></div></div></section>';
+    }
 
-function renderDecisions(decisions) {
-  if (!decisions || !decisions.length) {
-    document.getElementById("decisions-content").innerHTML = '<div class="empty">No decisions yet.</div>';
-    return;
-  }
-  const rows = decisions.slice(0, 25).map(d => {
-    const reason = (d.reasoning || "").slice(0, 80);
-    const status = d.approved
-      ? '<span class="pill live">approved</span>'
-      : '<span class="pill kill">rejected</span>';
-    return `<tr class="${d.approved ? '' : 'disapproved'}">
-      <td>${ts(d.ts)}</td>
-      <td>${d.symbol}</td>
-      <td>${d.action}</td>
-      <td>${d.playbook || "—"}</td>
-      <td class="num">${fmt(d.confidence, 2)}</td>
-      <td>${status}</td>
-      <td>${reason}</td>
-    </tr>`;
-  }).join("");
-  document.getElementById("decisions-content").innerHTML = `
-    <table>
-      <thead><tr>
-        <th>Time</th><th>Symbol</th><th>Action</th><th>Playbook</th>
-        <th class="num">Conf.</th><th>Status</th><th>Reasoning</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table>`;
-}
+    function renderHero() {
+      const box = $('section-latest-signal');
+      if (!latestSignal) {
+        box.innerHTML = '<section class="bg-surface-container-low border border-surface-variant rounded-lg p-space-md space-y-space-sm shadow-lg relative">'
+          + '<div class="flex items-center justify-between"><div class="flex items-center gap-2">'
+          + '<span class="bg-surface-container-high text-outline font-ticker-md text-label-sm px-2 py-0.5 rounded font-bold tracking-wider border border-surface-variant">WAITING</span>'
+          + '<span class="font-headline-md text-headline-md text-on-surface font-bold">LATEST SIGNAL</span></div></div>'
+          + '<p class="font-body-sm text-body-sm text-on-surface-variant">No signals yet — the bot is watching XAU/USD. New setups will appear here with entry, stop-loss and take-profit.</p></section>';
+        latestSignalId = null;
+        return;
+      }
+      if (latestSignalId !== latestSignal.id) {
+        box.innerHTML = heroHTML(latestSignal);
+        latestSignalId = latestSignal.id;
+      }
+      updateHeroLive();
+    }
 
-async function refresh() {
-  try {
-    const state = await getJSON("/api/state");
-    document.getElementById("banner").classList.toggle("active", !!state.kill_switch);
-    renderFeed(state.feed);
-    renderToday(state.today);
-    renderLastSignal(state.last_signal);
-    const [signals, decisions] = await Promise.all([
-      getJSON("/api/signals?limit=25"),
-      getJSON("/api/decisions?limit=25"),
-    ]);
-    renderSignals(signals.signals);
-    renderDecisions(decisions.decisions);
-  } catch (e) {
-    console.error("refresh failed:", e);
-  }
-}
+    function updateHeroLive() {
+      const sig = latestSignal;
+      if (!sig) return;
+      const valEl = $('floating-pnl-val');
+      const rEl = $('floating-pnl-r');
+      const barEl = $('pnl-bar-fill');
+      const posEl = $('pnl-position-text');
+      if (!valEl || !rEl || !barEl || !posEl) return;
+      if (sig.status === 'TP' || sig.status === 'SL') {
+        const r = sig.r;
+        const usd = (r != null && sig.risk_usd != null) ? r * sig.risk_usd : null;
+        valEl.textContent = fmtMoney(usd);
+        valEl.className = 'font-ticker-md text-ticker-md font-bold ' + (r != null && r >= 0 ? 'text-secondary' : 'text-error');
+        rEl.textContent = (r != null ? (r >= 0 ? '+' : '') + r.toFixed(2) + ' R' : '—');
+        barEl.style.width = sig.status === 'TP' ? '100%' : '0%';
+        posEl.textContent = sig.status === 'TP' ? 'Take-profit hit' : 'Stop-loss hit';
+        return;
+      }
+      const r = unrealizedR(sig, lastPrice);
+      const usd = (r != null && sig.risk_usd != null) ? r * sig.risk_usd : null;
+      if (r == null) {
+        valEl.textContent = '—';
+        rEl.textContent = '—';
+        posEl.textContent = 'Waiting for price…';
+        return;
+      }
+      valEl.textContent = fmtMoney(usd);
+      valEl.className = 'font-ticker-md text-ticker-md font-bold ' + (r >= 0 ? 'text-secondary' : 'text-error');
+      rEl.textContent = (r >= 0 ? '+' : '') + r.toFixed(2) + ' R';
+      const pos = pricePosition(sig, lastPrice);
+      if (pos != null) barEl.style.width = (pos * 100).toFixed(1) + '%';
+      const pts = Math.abs(lastPrice - sig.entry) / 0.01;
+      const inProfit = (sig.direction || '').toLowerCase() === 'buy' ? lastPrice >= sig.entry : lastPrice <= sig.entry;
+      posEl.textContent = inProfit ? 'In-Profit (+' + pts.toFixed(2) + ' pts)' : 'In loss (-' + pts.toFixed(2) + ' pts)';
+      posEl.className = 'font-bold ' + (inProfit ? 'text-secondary' : 'text-error');
+    }
 
-document.getElementById("refresh").addEventListener("click", refresh);
-document.getElementById("kill").addEventListener("click", async () => {
-  if (!confirm("Engage kill switch? No new signals will be sent.")) return;
-  await postJSON("/api/kill");
-  await refresh();
-});
-document.getElementById("resume").addEventListener("click", async () => {
-  if (!confirm("Release kill switch and allow new signals?")) return;
-  await postJSON("/api/resume");
-  await refresh();
-});
+    function renderHistory(signals) {
+      let wins = 0, losses = 0, netR = 0, netUsd = 0;
+      signals.forEach((s) => {
+        if (s.status === 'TP') {
+          wins += 1;
+          if (s.r != null) netR += s.r;
+          if (s.r != null && s.risk_usd != null) netUsd += s.r * s.risk_usd;
+        } else if (s.status === 'SL') {
+          losses += 1;
+          netR -= 1;
+          if (s.risk_usd != null) netUsd -= s.risk_usd;
+        }
+      });
+      const closed = wins + losses;
+      $('stat-winrate').textContent = closed ? Math.round((wins / closed) * 100) + '%' : '0%';
+      $('stat-winloss').textContent = wins + 'W / ' + losses + 'L';
+      $('stat-total').textContent = signals.length;
+      $('stat-netr').textContent = (netR >= 0 ? '+' : '') + netR.toFixed(1) + ' R';
+      $('stat-netusd').textContent = fmtMoney(netUsd);
+      const list = $('history-list');
+      if (!signals.length) {
+        list.innerHTML = '<div class="bg-surface-container-low border border-surface-variant rounded-lg p-2.5 text-center text-label-sm font-label-sm text-outline">No signals yet — the bot is watching the market. New setups will appear here.</div>';
+        return;
+      }
+      list.innerHTML = signals.map((s) => {
+        const isBuy = (s.direction || '').toLowerCase() === 'buy';
+        const dirBadge = isBuy
+          ? '<span class="text-secondary font-label-sm text-label-sm font-bold bg-secondary-container/20 px-1 py-0.5 rounded border border-secondary/30">BUY</span>'
+          : '<span class="text-error font-label-sm text-label-sm font-bold bg-error-container/20 px-1 py-0.5 rounded border border-error/30">SELL</span>';
+        let outcome;
+        if (s.status === 'TP') {
+          outcome = '<span class="text-secondary font-label-sm text-label-sm font-bold bg-secondary-container/30 px-1.5 py-0.5 rounded border border-secondary/40">HIT TP (' + (s.r != null ? '+' + s.r.toFixed(2) + 'R' : '') + (s.r != null && s.risk_usd != null ? ' / ' + fmtMoney(s.r * s.risk_usd) : '') + ')</span>';
+        } else if (s.status === 'SL') {
+          outcome = '<span class="text-error font-label-sm text-label-sm font-bold bg-error-container/30 px-1.5 py-0.5 rounded border border-error/40">HIT SL (-1.00R' + (s.risk_usd != null ? ' / ' + fmtMoney(-s.risk_usd) : '') + ')</span>';
+        } else {
+          const r = unrealizedR(s, lastPrice);
+          const usd = (r != null && s.risk_usd != null) ? r * s.risk_usd : null;
+          outcome = '<span class="text-secondary font-label-sm text-label-sm font-bold bg-secondary-container/30 px-1.5 py-0.5 rounded border border-secondary/40">OPEN' + (r != null ? ' (' + (r >= 0 ? '+' : '') + r.toFixed(2) + 'R' + (usd != null ? ' / ' + fmtMoney(usd) : '') + ')' : '') + '</span>';
+        }
+        const durSec = s.status !== 'OPEN' && s.close_ts ? s.close_ts - s.ts : Math.floor(Date.now() / 1000) - s.ts;
+        const durLabel = s.status !== 'OPEN' ? 'Duration: ' + fmtDuration(durSec) : 'Open ' + fmtDuration(durSec);
+        return '<div class="bg-surface-container-low border border-surface-variant rounded-lg p-2.5 space-y-1.5">'
+          + '<div class="flex justify-between items-center"><div class="flex items-center gap-1.5">'
+          + '<span class="font-label-sm text-label-sm text-outline">#' + s.id + '</span>' + dirBadge
+          + '<span class="font-ticker-md text-ticker-md text-on-surface font-semibold">@ ' + fmt(s.entry) + '</span></div>'
+          + outcome + '</div>'
+          + '<div class="flex justify-between text-label-sm font-label-sm text-outline bg-surface-container-lowest px-2 py-1 rounded border border-surface-variant">'
+          + '<span>SL: <strong class="text-on-surface font-mono">' + fmt(s.stop_loss) + '</strong></span>'
+          + '<span>TP: <strong class="text-on-surface font-mono">' + fmt(s.take_profit) + '</strong></span>'
+          + '<span class="text-on-surface-variant">' + durLabel + '</span></div></div>';
+      }).join('');
+    }
 
-refresh();
-setInterval(refresh, REFRESH_MS);
-</script>
-</body>
-</html>
+    async function fetchSignals() {
+      try {
+        const r = await fetch('/api/signals?limit=50');
+        if (!r.ok) return;
+        const data = await r.json();
+        signalsCache = data.signals || [];
+        latestSignal = signalsCache.length ? signalsCache[0] : null;
+        renderHero();
+        renderHistory(signalsCache);
+      } catch (e) { /* keep last values */ }
+    }
+
+    // ---------- decisions ----------
+    function renderDecisions(rows) {
+      const list = $('decisions-list');
+      if (!rows.length) {
+        list.innerHTML = '<div class="bg-surface-container-low border border-surface-variant rounded-lg p-2.5 text-center text-label-sm font-label-sm text-outline">No decisions logged yet.</div>';
+        return;
+      }
+      list.innerHTML = rows.map((d) => {
+        let badge;
+        if (d.approved && d.action === 'propose') {
+          badge = '<span class="text-secondary font-label-sm text-label-sm font-bold bg-secondary-container/20 border border-secondary/30 px-1.5 py-0.5 rounded">SIGNAL SENT</span>';
+        } else if (d.approved && d.action === 'no_trade') {
+          badge = '<span class="text-primary font-label-sm text-label-sm font-bold bg-primary-container/20 border border-primary-container/30 px-1.5 py-0.5 rounded">NO TRADE</span>';
+        } else if (!d.approved) {
+          const first = (d.reject_reasons && d.reject_reasons.length) ? readableReason(d.reject_reasons[0]) : 'Rejected';
+          badge = '<span class="text-error font-label-sm text-label-sm font-bold bg-error-container/20 border border-error/30 px-1.5 py-0.5 rounded">REJECTED: ' + esc(first) + '</span>';
+        } else {
+          badge = '<span class="text-outline font-label-sm text-label-sm font-bold bg-surface-container-lowest border border-surface-variant px-1.5 py-0.5 rounded">' + esc(String(d.action).toUpperCase()) + '</span>';
+        }
+        const metric = 'Action: ' + esc(d.action) + ' | Playbook: ' + esc(d.playbook || '—') + ' | Confidence: ' + (d.confidence != null ? Number(d.confidence).toFixed(2) : '—')
+          + ((d.reject_reasons && d.reject_reasons.length) ? ' | Reasons: ' + esc(d.reject_reasons.join(', ')) : '');
+        return '<div class="bg-surface-container-low border border-surface-variant rounded-lg p-2.5 space-y-1">'
+          + '<div class="flex justify-between items-center"><span class="font-label-sm text-label-sm text-outline">' + utcHMS(d.ts) + ' UTC</span>' + badge + '</div>'
+          + '<p class="font-body-sm text-body-sm text-on-surface">' + esc(d.reasoning || '—') + '</p>'
+          + '<div class="text-[10px] font-label-sm text-outline bg-surface-container-lowest px-2 py-0.5 rounded">' + metric + '</div></div>';
+      }).join('');
+    }
+
+    async function fetchDecisions() {
+      try {
+        const r = await fetch('/api/decisions?limit=20');
+        if (!r.ok) return;
+        const data = await r.json();
+        renderDecisions(data.decisions || []);
+      } catch (e) { /* keep last values */ }
+    }
+
+    // ---------- kill switch ----------
+    function setKill(engaged) {
+      killEngaged = engaged;
+      const btn = $('kill-switch-btn');
+      const icon = $('kill-icon');
+      const title = $('kill-state-title');
+      const sub = $('kill-state-sub');
+      const badge = $('kill-badge');
+      if (engaged) {
+        btn.className = 'w-full min-h-[44px] flex items-center justify-between px-space-md py-2 rounded bg-error-container/30 border border-error transition-all active:scale-[0.99]';
+        icon.textContent = 'pause_circle';
+        icon.className = 'material-symbols-outlined text-error text-xl animate-pulse';
+        title.textContent = 'PAUSED BY OPERATOR';
+        title.className = 'font-ticker-md text-ticker-md text-error font-bold leading-tight';
+        sub.textContent = 'Trading alerts suppressed. Tap to resume.';
+        badge.textContent = 'RESUME';
+        badge.className = 'px-2 py-0.5 rounded bg-error border border-error text-on-error font-label-sm text-label-sm font-bold';
+      } else {
+        btn.className = 'w-full min-h-[44px] flex items-center justify-between px-space-md py-2 rounded bg-surface-container-high border border-secondary transition-all active:scale-[0.99]';
+        icon.textContent = 'power_settings_new';
+        icon.className = 'material-symbols-outlined text-secondary text-xl';
+        title.textContent = 'BOT ACTIVE - BROADCASTING SIGNALS';
+        title.className = 'font-ticker-md text-ticker-md text-secondary font-bold leading-tight';
+        sub.textContent = 'Tap to emergency pause automated alerts';
+        badge.textContent = 'PAUSE';
+        badge.className = 'px-2 py-0.5 rounded bg-secondary-container/40 border border-secondary text-secondary font-label-sm text-label-sm';
+      }
+    }
+
+    $('kill-switch-btn').addEventListener('click', async () => {
+      if (killPending) return;
+      killPending = true;
+      try {
+        const r = await fetch(killEngaged ? '/api/resume' : '/api/kill', { method: 'POST' });
+        if (r.ok) {
+          const data = await r.json();
+          setKill(!!data.kill_switch);
+        }
+      } catch (e) { /* state unchanged; next poll re-syncs */ }
+      killPending = false;
+      fetchState();
+    });
+
+    // ---------- tabs & nav ----------
+    function switchView(tabName) {
+      const historyView = $('view-history');
+      const logsView = $('view-logs');
+      const tabBtnHistory = $('tab-btn-history');
+      const tabBtnLogs = $('tab-btn-logs');
+      if (tabName === 'history') {
+        historyView.classList.remove('hidden');
+        logsView.classList.add('hidden');
+        tabBtnHistory.className = 'min-h-[44px] flex items-center justify-center gap-1.5 rounded text-ticker-md font-ticker-md font-semibold bg-surface-container-high text-primary border border-surface-variant transition-all';
+        tabBtnLogs.className = 'min-h-[44px] flex items-center justify-center gap-1.5 rounded text-ticker-md font-ticker-md font-semibold text-outline hover:text-on-surface transition-all';
+      } else {
+        historyView.classList.add('hidden');
+        logsView.classList.remove('hidden');
+        tabBtnLogs.className = 'min-h-[44px] flex items-center justify-center gap-1.5 rounded text-ticker-md font-ticker-md font-semibold bg-surface-container-high text-primary border border-surface-variant transition-all';
+        tabBtnHistory.className = 'min-h-[44px] flex items-center justify-center gap-1.5 rounded text-ticker-md font-ticker-md font-semibold text-outline hover:text-on-surface transition-all';
+      }
+    }
+
+    const NAV_ACTIVE = 'flex flex-col items-center justify-center text-primary dark:text-primary font-label-sm text-label-sm py-space-xs min-h-[44px] min-w-[64px]';
+    const NAV_IDLE = 'flex flex-col items-center justify-center text-outline dark:text-outline font-label-sm text-label-sm py-space-xs min-h-[44px] min-w-[64px] hover:text-on-surface dark:hover:text-on-surface active:scale-95 transition-transform duration-100';
+    function setActiveNav(id) {
+      ['nav-monitor', 'nav-signals', 'nav-filters', 'nav-calendar'].forEach((n) => {
+        $(n).className = (n === id) ? NAV_ACTIVE : NAV_IDLE;
+      });
+    }
+    function scrollToEl(el) {
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    $('nav-monitor').addEventListener('click', (e) => { e.preventDefault(); setActiveNav('nav-monitor'); scrollToEl($('section-monitor')); });
+    $('nav-signals').addEventListener('click', (e) => { e.preventDefault(); setActiveNav('nav-signals'); switchView('history'); scrollToEl($('view-history')); });
+    $('nav-filters').addEventListener('click', (e) => { e.preventDefault(); setActiveNav('nav-filters'); switchView('logs'); scrollToEl($('view-logs')); });
+    $('nav-calendar').addEventListener('click', (e) => { e.preventDefault(); setActiveNav('nav-calendar'); scrollToEl($('section-news')); });
+
+    // ---------- freshness heartbeat (real tick age) ----------
+    setInterval(() => {
+      const elapsedSec = Math.max(0, lastTickMs ? (Date.now() - lastTickMs) / 1000 : (Date.now() - pageLoadedAt) / 1000);
+      $('freshness-timer').textContent = elapsedSec.toFixed(1) + 's';
+      $('tick-latency-hero').textContent = elapsedSec.toFixed(1) + 's ago';
+      $('feed-latency-display').textContent = elapsedSec.toFixed(1) + 's';
+      const staleBanner = $('stale-banner');
+      if (elapsedSec > 10.0) {
+        staleBanner.className = 'flex items-center justify-between px-2 py-1 rounded bg-error-container/30 border border-error text-error text-label-sm font-label-sm';
+      } else if (elapsedSec > 5.0) {
+        staleBanner.className = 'flex items-center justify-between px-2 py-1 rounded bg-primary-container/20 border border-primary-container text-primary text-label-sm font-label-sm';
+      } else {
+        staleBanner.className = 'flex items-center justify-between px-2 py-1 rounded bg-surface-container-lowest border border-surface-variant text-label-sm font-label-sm';
+      }
+    }, 200);
+
+    // ---------- polling ----------
+    fetchState();
+    fetchSignals();
+    fetchDecisions();
+    setInterval(fetchState, 2000);
+    setInterval(() => { fetchSignals(); fetchDecisions(); }, 15000);
+  </script>
+</body></html>

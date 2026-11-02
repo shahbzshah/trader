@@ -208,3 +208,206 @@ def test_decisions_limit_clamped(app_and_client):
     # Limit > 1000 should be rejected by FastAPI Query validation.
     r = client.get("/api/decisions?limit=99999")
     assert r.status_code == 422
+
+
+
+# --- New dashboard fields: uptime, price/day/news blocks, outcomes ---
+
+@pytest.fixture
+def fake_app(tmp_path):
+    """App + client + the FakeClient itself, so tests can set ticks
+    and candles before hitting the API."""
+    cfg_text = f"""
+mode: demo
+symbols: [XAUUSD]
+timeframes: [M15]
+schedule: {{scan_interval_minutes: 15}}
+session_hours: {{start: '00:00', end: '23:59'}}
+risk: {{max_risk_pct_per_trade: 1.0, max_daily_loss_pct: 3.0,
+       max_open_trades: 3, max_trades_per_day: 5, min_confidence: 0.6,
+       default_playbook: sweep_fvg_reclaim}}
+news: {{enabled: true, feed_url: 'https://example.invalid/ff.json',
+        cache_path: '{(tmp_path / 'news_cache.json').as_posix()}',
+        cache_ttl_hours: 12, currencies: [USD], min_impact: High,
+        window_minutes: 30}}
+signals: {{hypothetical_balance_usd: 10000.0, feed: auto,
+          telegram_enabled: true, max_signals_per_day: 5}}
+paths: {{data_dir: '{tmp_path.as_posix().replace(chr(92), '/')}',
+         logs_dir: '{tmp_path.as_posix().replace(chr(92), '/')}',
+         reports_dir: '{tmp_path.as_posix().replace(chr(92), '/')}',
+         knowledge_dir: 'knowledge',
+         kill_switch_path: '{(tmp_path / 'KILL_SWITCH').as_posix()}'}}
+dashboard: {{host: '127.0.0.1', port: 8765}}
+"""
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(cfg_text, encoding="utf-8")
+    fake = FakeClient()
+    fake._connected = True
+    app = create_app(cfg_path, client_factory=lambda: fake)
+    return app, TestClient(app), tmp_path, fake
+
+
+def _record_signal(tmp_path, direction="buy", entry=3900.0, sl=3885.0,
+                   tp=3930.0, risk_pct=1.0):
+    j = Journal(tmp_path / "journal.db")
+    raw = json.dumps({"direction": direction, "price": entry,
+                      "stop_loss": sl, "take_profit": tp,
+                      "risk_pct": risk_pct})
+    j.record_decision(symbol="XAUUSD", action="propose", confidence=0.85,
+                      reasoning="sweep+fvg", approved=True,
+                      raw_llm_json=raw)
+
+
+def test_health_exposes_uptime(fake_app):
+    _, client, _, _ = fake_app
+    body = client.get("/health").json()
+    assert isinstance(body.get("uptime_s"), int)
+    assert body["uptime_s"] >= 0
+
+
+def test_state_exposes_dashboard_blocks(fake_app):
+    _, client, _, _ = fake_app
+    data = client.get("/api/state").json()
+    assert isinstance(data.get("uptime_s"), int)
+    assert data.get("scan_interval_minutes") == 15
+    # Fake client has no tick and no candles: blocks present, empty.
+    assert "price" in data and data["price"]["mid"] is None
+    assert "day" in data and data["day"] is None
+    assert "news" in data
+    # No calendar cache at all: unavailable, never a false "all clear".
+    assert data["news"]["available"] is False
+    assert data["news"]["window_minutes"] == 30
+
+
+def _write_news_cache(tmp_path, fetched_at, event_minutes_from_now):
+    import datetime as _dt
+
+    when = (_dt.datetime.now(_dt.timezone.utc)
+            + _dt.timedelta(minutes=event_minutes_from_now))
+    payload = {
+        "fetched_at": fetched_at.isoformat(),
+        "events": [{
+            "title": "ISM Manufacturing PMI", "country": "USD",
+            "date": when.isoformat(), "impact": "High",
+            "forecast": "54.7", "previous": "54.5",
+        }],
+    }
+    (tmp_path / "news_cache.json").write_text(
+        json.dumps(payload), encoding="utf-8")
+
+
+def test_news_stale_cache_reports_unavailable(fake_app):
+    import datetime as _dt
+
+    _, client, tmp_path, _ = fake_app
+    # Cache fetched 2 days ago, still holding a future event: the
+    # fail-open fallback must NOT present the week as clear.
+    _write_news_cache(
+        tmp_path,
+        _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=2),
+        event_minutes_from_now=60)
+    news = client.get("/api/state").json()["news"]
+    assert news["available"] is False
+    assert news["next_event"] is None
+
+
+def test_news_fresh_cache_reports_next_event(fake_app):
+    import datetime as _dt
+
+    _, client, tmp_path, _ = fake_app
+    _write_news_cache(
+        tmp_path, _dt.datetime.now(_dt.timezone.utc),
+        event_minutes_from_now=60)
+    news = client.get("/api/state").json()["news"]
+    assert news["available"] is True
+    assert news["blackout_active"] is False
+    assert news["next_event"]["title"] == "ISM Manufacturing PMI"
+    assert 0 < news["next_event"]["minutes_until"] <= 60
+
+
+def test_signals_enriched_with_sizing(fake_app):
+    _, client, tmp_path, _ = fake_app
+    _record_signal(tmp_path)
+    sig = client.get("/api/signals").json()["signals"][0]
+    assert sig["status"] == "OPEN"
+    assert sig["lots"] == pytest.approx(0.06)
+    assert sig["risk_usd"] == pytest.approx(100.0)
+    assert sig["per_dollar_usd"] == pytest.approx(6.0)
+    assert sig["rr"] == pytest.approx(2.0)
+
+
+def test_outcome_tp_hit(fake_app):
+    from tests.fake_client import rates_from_rows
+    import time as _time
+
+    _, client, tmp_path, fake = fake_app
+    _record_signal(tmp_path)
+    t0 = int(_time.time()) + 900
+    fake.rates_by_tf[("XAUUSD", "M15")] = rates_from_rows(
+        [(3902.0, 3935.0, 3900.0, 3932.0)], t0=t0, step=900)
+    sig = client.get("/api/signals").json()["signals"][0]
+    assert sig["status"] == "TP"
+    assert sig["r"] == pytest.approx(2.0)
+    assert sig["close_price"] == pytest.approx(3930.0)
+
+
+def test_outcome_sl_hit_and_other_side_open(fake_app):
+    from tests.fake_client import rates_from_rows
+    import time as _time
+
+    _, client, tmp_path, fake = fake_app
+    _record_signal(tmp_path, direction="sell", entry=3900.0,
+                   sl=3915.0, tp=3870.0)
+    _record_signal(tmp_path, direction="buy", entry=3900.0,
+                   sl=3885.0, tp=3930.0)
+    t0 = int(_time.time()) + 900
+    # Candle low 3880 touches the buy SL (3885) but neither sell level
+    # (high 3902 < SL 3915, low 3880 > TP 3870).
+    fake.rates_by_tf[("XAUUSD", "M15")] = rates_from_rows(
+        [(3900.0, 3902.0, 3880.0, 3888.0)], t0=t0, step=900)
+    sigs = client.get("/api/signals").json()["signals"]
+    by_dir = {s["direction"]: s for s in sigs}
+    assert by_dir["sell"]["status"] == "OPEN"
+    assert by_dir["buy"]["status"] == "SL"
+    assert by_dir["buy"]["r"] == pytest.approx(-1.0)
+
+
+def test_outcome_both_touch_same_candle_nearer_wins(fake_app):
+    from tests.fake_client import rates_from_rows
+    import time as _time
+
+    _, client, tmp_path, fake = fake_app
+    _record_signal(tmp_path)
+    t0 = int(_time.time()) + 900
+    # One candle touches both SL (3885) and TP (3930); open 3900 is
+    # nearer the SL (15) than the TP (30) -> SL.
+    fake.rates_by_tf[("XAUUSD", "M15")] = rates_from_rows(
+        [(3900.0, 3935.0, 3880.0, 3910.0)], t0=t0, step=900)
+    sig = client.get("/api/signals").json()["signals"][0]
+    assert sig["status"] == "SL"
+    assert sig["r"] == pytest.approx(-1.0)
+
+
+def test_outcome_open_when_no_touch(fake_app):
+    from tests.fake_client import rates_from_rows
+    import time as _time
+
+    _, client, tmp_path, fake = fake_app
+    _record_signal(tmp_path)
+    t0 = int(_time.time()) + 900
+    fake.rates_by_tf[("XAUUSD", "M15")] = rates_from_rows(
+        [(3900.0, 3905.0, 3895.0, 3901.0)], t0=t0, step=900)
+    sig = client.get("/api/signals").json()["signals"][0]
+    assert sig["status"] == "OPEN"
+    assert sig["r"] is None
+
+
+def test_dashboard_index_has_no_fake_values(fake_app):
+    _, client, _, _ = fake_app
+    body = client.get("/").text
+    assert "HFT-v4" not in body
+    assert "2,348" not in body
+    assert "Verified MT5" not in body
+    assert "No signals yet" in body
+    assert "fonts.css" in body
+    assert "tailwind.js" in body
