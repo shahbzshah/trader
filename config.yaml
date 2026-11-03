@@ -11,16 +11,16 @@ schedule:
   scan_interval_minutes: 15
 
 session_hours:
-  start: "08:00"
-  end: "20:00"
+  start: "00:00"
+  end: "23:59"
   timezone: "UTC"
   skip_weekends: true
 
-# Kill zones (UTC, "HH:MM-HH:MM"): entries are only taken inside these
-# windows. Empty list = no kill-zone filter (session_hours still applies).
-kill_zones:
-  - "07:00-10:00"   # London kill zone
-  - "12:00-15:00"   # New York kill zone
+# Kill zones REMOVED 2026-11-03 on Megah's order ("not happy with them"):
+# entries are no longer restricted to London/New York windows. The bot
+# now scans and signals in every session while the market is open.
+# Empty list = no kill-zone filter (session_hours still applies).
+kill_zones: []
 
 risk:
   max_risk_pct_per_trade: 1.0

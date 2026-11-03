@@ -22,8 +22,9 @@ def test_load_config_from_real_yaml(config_yaml_path, env_path):
     assert cfg.symbols == ["XAUUSD"]
     assert cfg.timeframes == ["M15", "H1"]
     assert cfg.schedule.scan_interval_minutes == 15
-    assert cfg.session_hours.start == "08:00"
-    assert cfg.session_hours.end == "20:00"
+    assert cfg.session_hours.start == "00:00"
+    assert cfg.session_hours.end == "23:59"
+    assert cfg.kill_zones == []
     assert cfg.risk.max_risk_pct_per_trade == 1.0
     assert cfg.risk.max_daily_loss_pct == 3.0
     assert cfg.risk.max_open_trades == 3

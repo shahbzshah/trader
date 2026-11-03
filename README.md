@@ -118,7 +118,7 @@ alerted today is not re-sent), and `signals.max_signals_per_day`
 ## Configuration highlights (`config.yaml`)
 
 - `symbols`: XAUUSD (gold only) — `timeframes`: M15, H1
-- `schedule.scan_interval_minutes`: 15 — `session_hours`: 08:00–20:00 UTC, weekends skipped
+- `schedule.scan_interval_minutes`: 15 — `session_hours`: 00:00–23:59 UTC (all sessions), weekends skipped — `kill_zones`: none (removed 2026-11-03)
 - `signals.hypothetical_balance_usd`: 10000.0 — `signals.feed`: auto — `signals.max_signals_per_day`: 5
 
 ## Deploying to Render (free)

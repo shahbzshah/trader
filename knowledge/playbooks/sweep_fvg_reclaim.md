@@ -8,12 +8,12 @@
 Sweep + FVG Reclaim
 
 ## Market / Session
-XAUUSD on M15 triggers with H1 bias. Trade only inside the
-configured session (default 08:00-20:00 UTC, weekends skipped). Entries are
-further restricted to **kill zones** (default 07:00-10:00 and 12:00-15:00
-UTC -- London open and New York); the most reliable windows are the London
-open and the London/New York overlap; gold moves best in the New York
-session.
+XAUUSD on M15 triggers with H1 bias. Since 2026-11-03 the bot trades
+every session (00:00-23:59 UTC, weekends skipped — gold does not trade
+weekends on Deriv). Kill zones were removed the same day on Megah's
+order, so entries are no longer restricted to London/New York windows;
+the most reliable windows remain the London open and the London/New
+York overlap; gold moves best in the New York session.
 
 ## Position management
 - **Breakeven:** once a position is up **1.0R**, the stop is moved to the
