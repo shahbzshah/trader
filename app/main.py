@@ -1,20 +1,19 @@
-"""CLI entrypoint: run | serve | once | analyze | backtest | status | kill | resume.
+"""CLI entrypoint: run | serve | once | status | kill | resume | doctor | review.
 
-Signals-only bot: no MT5, no trade execution. The runner scans the
-market feed (OANDA v20 Practice first, Deriv WebSocket as fallback),
-runs the deterministic rules engine, and turns approved setups into
-journaled Telegram signals with paper sizing against a configured
-hypothetical balance.
+Signals-only bot: no MT5, no trade execution. The runner keeps the
+market feed warm (OANDA v20 Practice first, Deriv WebSocket as
+fallback) and serves the dashboard. The strategy was removed on
+2026-11-04 (Megah's order): no strategy runs, no decisions are made,
+no signals fire until the new approach lands. The scan loop still
+runs so the feed, candles and dashboard stay live.
 
 Commands:
     run      continuous scan loop (APScheduler) — local use
     serve    scan loop + dashboard web server on $PORT (Render)
-    once     single cycle; --analyze = propose-only (no alerts)
-    analyze  decide + print, never journals, never alerts
+    once     single cycle (feed check + candle refresh)
     status   feed connection + latest tick/candles
-    doctor   pre-flight self-check (feed, rules engine, news, Telegram)
-    backtest paper backtest on CSV candles (no feed, no network)
-    kill     engage the kill switch (stops new signals)
+    doctor   pre-flight self-check (feed, news, Telegram)
+    kill     engage the kill switch
     resume   release the kill switch
     review   generate a daily review markdown file
 """
@@ -200,7 +199,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     from app.scheduler import Scheduler
 
     cfg = load_config(args.config)
-    components = _build_components(args, cfg, analyze_only=False)
+    components = _build_components(args, cfg)
     if components is None:
         return 1
 
@@ -232,7 +231,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     from app.server import create_app
 
     cfg = load_config(args.config)
-    components = _build_components(args, cfg, analyze_only=False)
+    components = _build_components(args, cfg)
     if components is None:
         return 1
 
@@ -270,14 +269,12 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_once(args: argparse.Namespace) -> int:
-    """Single full cycle (scan -> decide -> risk -> signal -> journal).
 
-    Ignores session hours; honors kill switch. With ``--analyze`` the
-    signal engine is skipped entirely (propose-only, no alerts).
-    """
+
+def _cmd_once(args: argparse.Namespace) -> int:
+    """Single cycle: feed check + candle refresh. No strategy runs."""
     cfg = load_config(args.config)
-    components = _build_components(args, cfg, analyze_only=bool(args.analyze))
+    components = _build_components(args, cfg)
     if components is None:
         return 1
     res = run_once(components)
@@ -290,14 +287,16 @@ def _cmd_once(args: argparse.Namespace) -> int:
     return 0
 
 
-def _build_components(args: argparse.Namespace, cfg, *, analyze_only: bool):
-    """Construct feed client, journal, signal engine and Telegram alerter.
+
+
+def _build_components(args: argparse.Namespace, cfg):
+    """Construct feed client, journal and Telegram alerter.
 
     Returns None and prints a clean error if no market feed can be
-    reached.
+    reached. No signal engine exists any more: the strategy was
+    removed on 2026-11-04, so there is nothing to turn into signals.
     """
     from app.journal import Journal
-    from app.signals import SignalEngine
     from app.telegram import TelegramAlerter
 
     secrets = _resolve_secrets(args)
@@ -319,194 +318,59 @@ def _build_components(args: argparse.Namespace, cfg, *, analyze_only: bool):
         if not telegram.enabled:
             logger.warning(
                 "Telegram not configured (TELEGRAM_BOT_TOKEN / "
-                "TELEGRAM_CHAT_ID); signals will be journaled only"
+                "TELEGRAM_CHAT_ID); no alerts will be sent"
             )
-
-    engine = None if analyze_only else SignalEngine(
-        client, journal, cfg, telegram=telegram)
 
     components = {
         "cfg": cfg,
         "client": client,
         "feed": source,
         "journal": journal,
-        "engine": engine,
         "telegram": telegram,
-        "analyze_only": analyze_only,
     }
     return components
 
 
+
+
+
 def run_once(components: dict) -> dict:
-    """One full scan cycle. Returns a small result dict for callers/tests."""
-    from app.brain import decide
+    """One scan cycle. Returns a small result dict for callers/tests.
+
+    The strategy was removed on 2026-11-04, so a cycle only keeps the
+    feed warm and refreshes candles for the dashboard: it scans the
+    watchlist (which pulls fresh candles + ticks) and logs an active
+    news blackout if one applies. No decision is made, nothing is
+    journaled, no signal fires.
+    """
     from app.scanner import scan_watchlist
 
     cfg = components["cfg"]
-    journal = components["journal"]
-    engine = components["engine"]
-    analyze_only = components["analyze_only"]
 
     snapshots = scan_watchlist(components["client"], cfg)
 
-    decisions = signals = duplicates = rejected = 0
     from app import news as news_mod
 
     blackout = news_mod.current_blackout(cfg)
     if blackout is not None:
         logger.warning(
-            "news blackout active: %s (%s) at %s UTC — standing down this cycle",
+            "news blackout active: %s (%s) at %s UTC — no strategy to stand down",
             blackout.title,
             blackout.currency,
             blackout.time_utc.strftime("%H:%M"),
         )
-    for snap in snapshots:
-        if blackout is not None:
-            journal.record_decision(
-                symbol=snap.get("symbol", ""),
-                action="no_trade",
-                reasoning=(
-                    f"news blackout: {blackout.title} "
-                    f"({blackout.currency}, {blackout.impact}) at "
-                    f"{blackout.time_utc.strftime('%H:%M')} UTC"
-                ),
-                approved=True,
-                reject_reasons=[],
-                raw_llm_json="",
-            )
-            decisions += 1
-            continue
-        try:
-            decision = decide(snap, cfg)
-        except Exception as exc:  # noqa: BLE001
-            journal.record_decision(
-                symbol=snap.get("symbol", ""),
-                action="error",
-                reasoning=str(exc),
-                approved=False,
-                reject_reasons=[f"strategy_error:{exc}"],
-                raw_llm_json="",
-            )
-            rejected += 1
-            decisions += 1
-            continue
-
-        decisions += 1
-        if analyze_only or engine is None:
-            # Just journal the decision without signaling.
-            journal.record_decision(
-                symbol=decision.symbol,
-                action=decision.action,
-                playbook=decision.playbook or "",
-                confidence=float(decision.confidence),
-                risk_pct=float(decision.risk_pct),
-                reasoning=decision.reasoning,
-                approved=True,
-                reject_reasons=[],
-                raw_llm_json=decision.model_dump_json(),
-            )
-            continue
-
-        result = engine.process(decision,
-                                raw_llm_json=decision.model_dump_json())
-        if result.status == "signaled":
-            signals += 1
-        elif result.status == "duplicate":
-            duplicates += 1
-        elif result.status in ("rejected", "capped"):
-            rejected += 1
-        # "skipped" (no_trade) counts as neither.
-
-    # NOTE: no breakeven step — signals-only has no open positions to
-    # manage. app.manage.breakeven_moves is retained (pure, tested) for
-    # a future execution mode, but the runner never calls it here.
+    else:
+        logger.info("scan cycle complete: %d symbol(s), no strategy configured",
+                    len(snapshots))
     return {
-        "decisions": decisions,
-        "signals": signals,
-        "duplicates": duplicates,
-        "rejected": rejected,
+        "decisions": 0,
+        "signals": 0,
+        "duplicates": 0,
+        "rejected": 0,
     }
 
 
-def _cmd_analyze(args: argparse.Namespace) -> int:
-    """Decide + print, NEVER journal, NEVER alert.
 
-    Falls back to an empty client when no feed is reachable, so the
-    rules engine can still be inspected offline.
-    """
-    from app.brain import decide
-    from app.risk import AccountState, RiskVerdict, check_decision
-    from app.scanner import scan_watchlist
-    from app.signals import hypothetical_balance, size_signal
-
-    cfg = load_config(args.config)
-    if cfg is None:
-        print("config not found")
-        return 1
-
-    secrets = _resolve_secrets(args)
-    try:
-        client, source = build_market_client(
-            cfg, secrets, feed_override=getattr(args, "feed", None))
-        print(f"feed: {source}")
-    except MarketDataError as exc:
-        print(f"no market feed available ({exc}); using empty data")
-        client = _EmptyClient()
-
-    try:
-        snapshots = scan_watchlist(client, cfg)
-    finally:
-        try:
-            client.shutdown()
-        except Exception:  # noqa: BLE001
-            pass
-
-    balance = hypothetical_balance(cfg)
-    kill_path = Path(cfg.paths.kill_switch_path)
-    account_state = AccountState(
-        balance=balance,
-        equity=balance,
-        starting_balance_today=balance,
-        trade_mode=cfg.mode,
-        kill_switch_engaged=kill_path.exists(),
-    )
-
-    from app import news as news_mod
-
-    blackout_event = news_mod.current_blackout(cfg)
-    for snap in snapshots:
-        if blackout_event is not None:
-            print(
-                f"[{snap.get('symbol')}] action=no_trade "
-                f"(news blackout: {blackout_event.title})"
-            )
-            continue
-        try:
-            decision = decide(snap, cfg)
-        except Exception as exc:  # noqa: BLE001
-            print(f"[{snap.get('symbol')}] strategy error: {exc}")
-            continue
-
-        verdict: RiskVerdict = check_decision(
-            decision, account_state, [], [], cfg
-        )
-        extra = ""
-        if decision.action == "propose" and verdict.approved:
-            try:
-                lots, risk_usd, per_dollar = size_signal(cfg, client, decision)
-                extra = (f" sizing: {lots:.2f} lots, risk ${risk_usd:.2f}, "
-                         f"${per_dollar:.2f} per $1 move (paper ${balance:,.0f})")
-            except ValueError as exc:
-                extra = f" sizing failed: {exc}"
-        print(
-            f"[{snap.get('symbol')}] action={decision.action} "
-            f"approved={verdict.approved} "
-            f"reasons={verdict.reasons} "
-            f"playbook={decision.playbook!r} "
-            f"confidence={decision.confidence:.2f} "
-            f"reasoning={decision.reasoning[:80]!r}{extra}"
-        )
-    return 0
 
 
 class _EmptyClient:
@@ -575,31 +439,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_backtest(args: argparse.Namespace) -> int:
-    """Paper backtest of the rules engine on historical CSV candles.
 
-    No feed, no network. Replays closed candles through
-    scanner -> strategy -> risk with paper sizing.
-    """
-    from app.backtest import run_backtest
-
-    cfg = load_config(args.config)
-    summary = run_backtest(
-        args.csv,
-        symbol=args.symbol,
-        timeframe=args.timeframe,
-        config=cfg,
-    )
-    print(f"Backtest {summary['symbol']} {summary['timeframe']}: "
-          f"{summary['bars']} bars")
-    print(f"Trades: {summary['trades']} | "
-          f"Wins: {summary['wins']} ({summary['win_rate_pct']:.1f}%) | "
-          f"Avg R: {summary['avg_r']:+.2f} | "
-          f"Profit factor: {summary['profit_factor']:.2f}")
-    print(f"Max drawdown: {summary['max_drawdown_pct']:.2f}% | "
-          f"Final equity: ${summary['final_equity']:.2f} "
-          f"({summary['return_pct']:+.2f}%)")
-    return 0
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
@@ -609,10 +449,9 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
       1. OANDA credentials are configured (warn only — Deriv covers it),
       2. a market feed connects (OANDA, else Deriv),
       3. every configured symbol serves live rates + ticks,
-      4. the rules engine passes a self-test,
-      5. the news calendar feed (fail-open: warn only),
-      6. the Telegram token validates via getMe (warn only),
-      7. the kill switch is off.
+      4. the news calendar feed (fail-open: warn only),
+      5. the Telegram token validates via getMe (warn only),
+      6. the kill switch is off.
 
     Returns 0 only when no check FAILs (warnings are non-fatal).
     """
@@ -659,16 +498,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             add(f"symbol {symbol} live data", "fail",
                 f"{type(exc).__name__}: {exc}")
 
-    # 4. Rules engine self-test: a synthetic snapshot must decide cleanly.
-    try:
-        from app.strategy import decide
-        probe = decide({"symbol": "XAUUSD", "timeframes": {}}, cfg)
-        assert probe.action == "no_trade"
-        add("rules engine", "ok", "strategy.decide self-test passed")
-    except Exception as exc:  # noqa: BLE001
-        add("rules engine", "fail", f"{type(exc).__name__}: {exc}")
-
-    # 5. News calendar feed (fail-open: warn only, never fail).
+    # 4. News calendar feed (fail-open: warn only, never fail).
     try:
         from app import news as news_mod
 
@@ -687,7 +517,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     except Exception as exc:  # noqa: BLE001
         add("news calendar", "warn", f"feed unreachable, fail-open: {exc}")
 
-    # 6. Telegram token validation (getMe — sends no message).
+    # 5. Telegram token validation (getMe — sends no message).
     try:
         from app.telegram import TelegramAlerter
 
@@ -705,7 +535,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     except Exception as exc:  # noqa: BLE001
         add("Telegram alerts", "warn", f"check failed: {exc}")
 
-    # 7. Kill switch.
+    # 6. Kill switch.
     ks = Path(cfg.paths.kill_switch_path)
     if ks.exists():
         add("kill switch", "warn", f"ENGAGED at {ks}")
@@ -751,19 +581,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.set_defaults(func=_cmd_serve)
 
     p_once = sub.add_parser("once", help="single cycle")
-    p_once.add_argument("--analyze", action="store_true",
-                        help="single cycle in propose-only mode (no alerts)")
     _add_feed_arg(p_once)
     p_once.set_defaults(func=_cmd_once)
 
-    p_analyze = sub.add_parser("analyze", help="analyze only, no journal, no alerts")
-    p_analyze.add_argument("--dry", action="store_true",
-                            help="alias for the default no-journal behavior")
-    _add_feed_arg(p_analyze)
-    p_analyze.set_defaults(func=_cmd_analyze)
-
     p_doctor = sub.add_parser(
-        "doctor", help="pre-flight self-check of feed + rules engine + Telegram")
+        "doctor", help="pre-flight self-check of feed + news + Telegram")
     _add_feed_arg(p_doctor)
     p_doctor.set_defaults(func=_cmd_doctor)
 
@@ -771,17 +593,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_review.add_argument("--day", default=None,
                            help="ISO date (YYYY-MM-DD); default = today UTC")
     p_review.set_defaults(func=_cmd_review)
-
-    p_backtest = sub.add_parser(
-        "backtest",
-        help="paper backtest of the rules engine on CSV candles (no feed)")
-    p_backtest.add_argument("--symbol", default="XAUUSD",
-                            help="symbol label for the CSV data")
-    p_backtest.add_argument("--timeframe", default="M15",
-                            help="timeframe label of the CSV candles")
-    p_backtest.add_argument("--csv", required=True,
-                            help="CSV with columns time,open,high,low,close,volume")
-    p_backtest.set_defaults(func=_cmd_backtest)
 
     return parser
 

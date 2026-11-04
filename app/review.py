@@ -259,7 +259,7 @@ def generate_proposals(decisions: Sequence[Mapping]) -> list[dict]:
                 "title": f"{pb}: setup rarely triggers",
                 "body": (f"Only {len(proposes)}/{len(rows)} decisions proposed a trade. "
                          "If this persists across weeks, consider widening the trigger "
-                         "(e.g. larger sweep lookback) or checking the session filter."),
+                         "or checking the session filter."),
             })
         vetoed = [r for r in proposes if not r.get("approved")]
         if len(proposes) >= 10 and len(vetoed) / len(proposes) > 0.5:
@@ -267,7 +267,7 @@ def generate_proposals(decisions: Sequence[Mapping]) -> list[dict]:
                 "playbook": pb,
                 "title": f"{pb}: risk gate vetoes most proposals",
                 "body": (f"{len(vetoed)}/{len(proposes)} proposals were rejected by risk.py. "
-                         "Review the dominant reject reasons below -- the strategy may be "
+                         "Review the dominant reject reasons below -- the setup may be "
                          "over-trading into the daily-loss or open-trade caps."),
             })
 
@@ -286,7 +286,7 @@ def generate_proposals(decisions: Sequence[Mapping]) -> list[dict]:
                 "body": ("This veto fired most often. If it is 'max_trades_per_day_reached' "
                          "or 'max_open_trades_reached', the caps are doing their job. If it is "
                          "'confidence_below_min' or 'spread', the setup may be firing in "
-                         "conditions it should skip -- tighten the strategy filters."),
+                         "conditions it should skip -- tighten the entry filters."),
             })
     return proposals[:5]
 

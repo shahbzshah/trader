@@ -11,7 +11,7 @@ def test_build_parser_has_required_subcommands():
     parser = build_parser()
     help_text = parser.format_help()
     for cmd in ("status", "kill", "resume", "run", "serve", "once",
-                "analyze", "doctor", "review", "backtest"):
+                "doctor", "review"):
         assert cmd in help_text
 
 

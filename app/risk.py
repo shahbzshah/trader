@@ -1,10 +1,11 @@
-"""Pure risk functions: position sizing + veto checks.
+"""Pure risk functions: position sizing + daily P/L accounting.
 
 No I/O. All inputs passed in. 100% unit-testable.
 
-This module is the ONLY authority on position sizing and limits. The strategy
-proposes; code disposes. Any decision failing a check is rejected and
-journaled with the rejection reasons.
+The strategy was removed on 2026-11-04 (Megah's order), so the
+decision veto gate (``check_decision``) is gone with it. What remains
+is the plumbing the next strategy will plug into: position sizing
+(``position_size``) and realised-P/L accounting (``daily_realized_pl``).
 """
 
 from __future__ import annotations
@@ -13,15 +14,6 @@ import datetime as _dt
 import math
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
-
-
-@dataclass
-class RiskVerdict:
-    approved: bool
-    reasons: list[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        return {"approved": self.approved, "reasons": list(self.reasons)}
 
 
 @dataclass
@@ -154,171 +146,8 @@ def daily_realized_pl(journal_rows: Iterable[Mapping]) -> float:
     return total
 
 
-def _count_open_trades(open_positions: Iterable[Any], symbol: str | None = None) -> int:
-    if symbol is None:
-        return sum(1 for _ in open_positions)
-    return sum(1 for p in open_positions if getattr(p, "symbol", "") == symbol)
-
-
-def _count_trades_today(journal_rows: Iterable[Mapping]) -> int:
-    """Count order rows placed today (UTC).
-
-    Mirrors daily_realized_pl's day filter but counts rather than sums.
-    """
-    today = _now_utc().date()
-    count = 0
-    for row in journal_rows:
-        if hasattr(row, "__getitem__"):
-            kind = row.get("kind", "") if hasattr(row, "get") else row["kind"]
-            ts_raw = row.get("ts") if hasattr(row, "get") else row["ts"]
-        else:
-            kind = getattr(row, "kind", "")
-            ts_raw = getattr(row, "ts", None)
-        if kind not in ("order_placed", "order_filled", "order_submitted"):
-            continue
-        if ts_raw is None:
-            continue
-        try:
-            ts = _dt.datetime.fromtimestamp(float(ts_raw), tz=_dt.timezone.utc)
-        except (TypeError, ValueError):
-            continue
-        if ts.date() == today:
-            count += 1
-    return count
-
-
-def check_decision(
-    decision: Any,
-    account_state: AccountState,
-    open_positions: Iterable[Any],
-    journal: Iterable[Mapping],
-    config: Any,
-) -> RiskVerdict:
-    """Veto gate for a strategy decision. Returns approved=True only if all
-    checks pass.
-
-    Checks performed (in order):
-      1. Kill switch must be off.
-      2. Account must be in demo mode.
-      3. ``decision.action`` must be one of: "no_trade", "propose", "close",
-         "modify". (This module is also the gate for action type; in the
-         old trading bot the executor enforced action-specific rules.)
-      4. For "propose" / "modify": symbol must be on the watchlist; SL must
-         be on the correct side of (proposed) entry; confidence must be
-         >= ``config.risk.min_confidence``; ``risk_pct`` is clamped to the
-         config maximum.
-      5. Open-trade cap.
-      6. Trades-today cap.
-      7. Daily loss cap: realised P/L + (this trade's projected risk on
-         equity) must not exceed ``config.risk.max_daily_loss_pct``.
-
-    A ``"no_trade"`` decision is always approved (it carries no risk).
-    """
-    reasons: list[str] = []
-    if account_state.kill_switch_engaged:
-        reasons.append("kill_switch_engaged")
-        return RiskVerdict(False, reasons)
-
-    if account_state.trade_mode != "demo":
-        reasons.append("not_demo_account")
-        return RiskVerdict(False, reasons)
-
-    action = getattr(decision, "action", None)
-    if action not in ("no_trade", "propose", "close", "modify"):
-        reasons.append(f"invalid_action:{action!r}")
-        return RiskVerdict(False, reasons)
-
-    if action == "no_trade":
-        return RiskVerdict(True, [])
-
-    # close / modify do not open new exposure.
-    if action in ("close", "modify"):
-        return RiskVerdict(True, [])
-
-    # --- Daily loss halt: an explicit, journal-friendly stop for the day.
-    # Once realised P/L has hit the cap, no new entries are proposed for
-    # the rest of the UTC day. (The projected-risk cap further below is a
-    # second layer that also blocks a trade whose own risk would breach it.)
-    max_daily_loss = float(getattr(getattr(config, "risk", None), "max_daily_loss_pct", 3.0))
-    realised = daily_realized_pl(journal)
-    starting = float(getattr(account_state, "starting_balance_today", account_state.balance) or account_state.balance)
-    realised_pct = (realised / starting) * 100.0 if starting > 0 else 0.0
-    if max_daily_loss > 0 and realised_pct <= -max_daily_loss:
-        return RiskVerdict(
-            False,
-            [f"daily_loss_halt_engaged:realised={realised_pct:.2f}%<={-max_daily_loss:.2f}%"],
-        )
-
-    # --- "propose": enforce full set of rules ---
-    symbol = getattr(decision, "symbol", "")
-    watchlist = list(getattr(config, "symbols", []) or [])
-    if symbol and watchlist and symbol.upper() not in {s.upper() for s in watchlist}:
-        reasons.append(f"symbol_not_in_watchlist:{symbol}")
-
-    entry = getattr(decision, "price", None)
-    sl = getattr(decision, "stop_loss", None)
-    tp = getattr(decision, "take_profit", None)
-    direction = getattr(decision, "direction", None)
-    if direction not in ("buy", "sell"):
-        reasons.append(f"invalid_direction:{direction!r}")
-    if entry is None or sl is None:
-        reasons.append("missing_entry_or_sl")
-    else:
-        try:
-            entry_f = float(entry)
-            sl_f = float(sl)
-            if direction == "buy" and sl_f >= entry_f:
-                reasons.append("sl_wrong_side_for_buy")
-            elif direction == "sell" and sl_f <= entry_f:
-                reasons.append("sl_wrong_side_for_sell")
-        except (TypeError, ValueError):
-            reasons.append("non_numeric_entry_or_sl")
-    if tp is None:
-        reasons.append("missing_tp")
-
-    # Confidence floor.
-    min_conf = float(getattr(getattr(config, "risk", None), "min_confidence", 0.6))
-    confidence = float(getattr(decision, "confidence", 0.0) or 0.0)
-    if confidence < min_conf:
-        reasons.append(f"confidence_below_min:{confidence:.2f}<{min_conf:.2f}")
-
-    # risk_pct cap (use config if lower than the strategy's suggestion).
-    max_risk = float(getattr(getattr(config, "risk", None), "max_risk_pct_per_trade", 1.0))
-    suggested_risk = float(getattr(decision, "risk_pct", 0.0) or 0.0)
-    if suggested_risk > max_risk:
-        reasons.append(f"risk_pct_above_max:{suggested_risk:.2f}>{max_risk:.2f}")
-
-    # Open-trade cap.
-    open_count = _count_open_trades(open_positions)
-    max_open = int(getattr(getattr(config, "risk", None), "max_open_trades", 3))
-    if open_count >= max_open:
-        reasons.append(f"max_open_trades_reached:{open_count}>={max_open}")
-
-    # Trades-today cap.
-    today_count = _count_trades_today(journal)
-    max_today = int(getattr(getattr(config, "risk", None), "max_trades_per_day", 5))
-    if today_count >= max_today:
-        reasons.append(f"max_trades_per_day_reached:{today_count}>={max_today}")
-
-    # Daily loss cap (second layer): realised P/L + this trade's projected
-    # risk must not exceed max_daily_loss_pct.
-    if starting > 0:
-        projected_risk_pct = float(suggested_risk) if suggested_risk > 0 else 0.0
-        if -realised_pct + projected_risk_pct > max_daily_loss:
-            reasons.append(
-                f"daily_loss_cap_exceeded:realised={realised_pct:.2f}% "
-                f"+trade_risk={projected_risk_pct:.2f}%>{max_daily_loss:.2f}%"
-            )
-
-    if reasons:
-        return RiskVerdict(False, reasons)
-    return RiskVerdict(True, [])
-
-
 __all__ = [
     "AccountState",
-    "RiskVerdict",
-    "check_decision",
     "daily_realized_pl",
     "position_size",
 ]

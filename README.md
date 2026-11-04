@@ -3,25 +3,23 @@
 Rules-based **signals-only** bot for gold (XAUUSD). No MT5, no trade
 execution, no broker account.
 
-It watches gold on a schedule, builds technical snapshots (EMAs, RSI, ATR,
-swing levels, fair value gaps, liquidity sweeps, market structure) from live
-candle data, runs a **deterministic rules engine** (no LLM, no network) for
-the SMC "sweep + FVG reclaim" setup, enforces hard risk limits in pure code,
-sizes each setup against a **configured hypothetical balance** (default
-$10,000 — no real money anywhere), journals every signal, and posts it to
-Telegram. Ships with a pre-flight `doctor` command, a kill switch, a paper
-backtester, and a dark-theme web dashboard.
-
-```
-scan watchlist → rules engine → risk veto/paper sizing → Telegram signal → journal
-```
+It watches gold on a schedule, keeps the feed warm and serves a live
+dark-theme web dashboard. **The strategy was removed on 2026-11-04
+(Megah's order): no strategy runs, no decisions are made, no signals
+fire until the new approach lands.** What remains is the plumbing the
+next strategy plugs into: live feeds (OANDA Practice main, Deriv
+fallback), technical snapshots (EMAs, RSI, ATR, swing levels, fair
+value gaps, liquidity sweeps, market structure), paper sizing against
+a **configured hypothetical balance** (default $10,000 — no real money
+anywhere), the journal + signal ledger, Telegram alerting, a kill
+switch, and a pre-flight `doctor` command.
 
 ## Safety model (non-negotiable)
 
 | Invariant | Enforcement |
 |---|---|
 | **Signals only — never trades** | There is no order-placement code anywhere. `app/executor.py` and `app/mt5_client.py` were deleted; no module imports MetaTrader5. A signal is a message, not an order. |
-| **The strategy proposes, code disposes** | `app/risk.py` is the *only* authority on sizing and vetoes. Any decision failing a check is rejected and journaled with the reasons — regardless of what the rules engine suggested. |
+| **No strategy, no signals** | The strategy was removed 2026-11-04. Nothing in the codebase can produce a decision or a signal until the new approach lands — the scan loop only keeps the feed warm and refreshes dashboard candles. |
 | **Kill switch** | Flag file `data/KILL_SWITCH` + `kill`/`resume` CLI commands + dashboard buttons. Checked by the risk gate before every signal; the dashboard shows a red banner while engaged. |
 | **Secrets never leak** | OANDA + Telegram credentials live only in `.env` (gitignored) or the Render dashboard. They are never printed, logged, or committed. The Deriv fallback needs no credentials at all. |
 | **Paper sizing** | Every signal prints risk$ and lots computed from `signals.hypothetical_balance_usd` (default $10,000) at `risk.max_risk_pct_per_trade` (default 1%): lots = risk$ / (SL$ x 100) for gold (1 lot = 100 oz). |
@@ -65,8 +63,7 @@ python -m app.main doctor     # pre-flight — get every check to [OK]
 
 ```bash
 python -m app.main status --feed deriv   # feed + latest tick (works with no credentials)
-python -m app.main analyze --dry         # snapshots + rules-engine decisions + sizing preview, zero alerts
-python -m app.main once --feed deriv     # one full cycle (journals signals, sends Telegram if configured)
+python -m app.main once --feed deriv     # one cycle (feed check + candle refresh, no decisions)
 python -m app.main run                   # scheduled loop (local)
 python -m app.main serve                 # scan loop + dashboard on $PORT (Render)
 ```
@@ -75,45 +72,28 @@ python -m app.main serve                 # scan loop + dashboard on $PORT (Rende
 
 | Command | What it does |
 |---|---|
-| `python -m app.main doctor` | Pre-flight self-check: OANDA credentials (warn if missing), feed connect, per-symbol live data, rules-engine self-test, news calendar, Telegram token validation (`getMe` — sends no message), kill switch. Exit code 0 only when everything passes. |
+| `python -m app.main doctor` | Pre-flight self-check: OANDA credentials (warn if missing), feed connect, per-symbol live data, news calendar, Telegram token validation (`getMe` — sends no message), kill switch. Exit code 0 only when everything passes. |
 | `python -m app.main status` | Feed connection, latest tick, recent M15 candles, kill-switch state. Never crashes when no feed is reachable. |
-| `python -m app.main analyze --dry` | Build snapshots, run the rules engine, print decisions + paper sizing. **Never journals, never alerts.** |
-| `python -m app.main once` | One full cycle (ignores session hours). Signals are journaled + sent to Telegram. |
-| `python -m app.main once --analyze` | One propose-only cycle (no alerts). |
+| `python -m app.main once` | One cycle: feed check + candle refresh. No decisions, no signals. |
 | `python -m app.main run` | Continuous loop on the configured schedule, session-hours aware (local use). |
 | `python -m app.main serve` | Scan loop + dashboard web server on `0.0.0.0:$PORT` (Render free web service). |
 | `python -m app.main kill` / `resume` | Engage / release the kill switch. |
-| `python -m app.main review [--day YYYY-MM-DD]` | Daily report to `reports/`: stats, every decision + reasoning, deterministic advisory proposals. |
-| `python -m app.main backtest --symbol XAUUSD --timeframe M15 --csv data.csv` | Paper backtest of the rules engine on CSV candles (`time,open,high,low,close,volume`). No feed, no network. Prints trades, win rate, avg R, profit factor, max drawdown. |
+| `python -m app.main review [--day YYYY-MM-DD]` | Daily report to `reports/`: stats, every journaled decision + reasoning, deterministic advisory proposals. |
 
-## Strategy: sweep + FVG reclaim
+## Strategy: REMOVED 2026-11-04
 
-One setup, run mechanically (`app/strategy.py`, spec in
-`knowledge/playbooks/sweep_fvg_reclaim.md`):
+The sweep + FVG reclaim strategy (`app/strategy.py`,
+`knowledge/playbooks/sweep_fvg_reclaim.md`) was removed on Megah's
+order. The aim is to capture any move, not just one setup — the new
+approach is his to explain next.
 
-- **Bias (H1):** market-structure trend up/down (BOS/CHoCH) aligned with EMA50.
-- **Trigger (M15):** liquidity sweep of the recent swing high/low within the
-  last 5 bars — wick beyond the level, close back inside.
-- **Entry:** fresh, unfilled M15 fair value gap formed at/after the sweep;
-  limit entry at the FVG midpoint.
-- **Stop:** beyond the sweep extreme, never closer than 1x ATR14.
-- **Target:** single take-profit at 2R.
-- **Filters:** configured session hours only, spread cap, weekends skipped,
-  and a **news blackout** — no signals within ±30 min of a high-impact USD
-  event (free ForexFactory calendar feed, cached to `data/news_cache.json`,
-  fail-open with a logged warning; see `news:` in `config.yaml`).
-
-All thresholds are module-level constants at the top of `app/strategy.py`.
-The engine is deterministic: the same snapshot always yields the same
-decision. `no_trade` is the default action.
-
-Signals: the strategy's `entry_type="limit"` decisions become Telegram
-alerts with entry/SL/TP + paper sizing. Limit placement is validated
-against the live tick (buy limit below ask / sell limit above bid);
-mispriced decisions are rejected before they are alerted. Identical
-signals are de-duplicated (same symbol/direction/entry/SL/TP already
-alerted today is not re-sent), and `signals.max_signals_per_day`
-(default 5) caps alert spam.
+Until it lands: the bot keeps the feed warm, serves the dashboard and
+journals nothing new. The news blackout still applies to the scan
+loop (no signals within ±30 min of a high-impact USD event; free
+ForexFactory calendar feed, cached to `data/news_cache.json`,
+fail-open with a logged warning; see `news:` in `config.yaml`) —
+it just has no decisions to stand down at the moment. Weekends are
+still skipped (no Deriv gold ticks).
 
 ## Configuration highlights (`config.yaml`)
 
@@ -143,38 +123,33 @@ Keep the service awake with a 5-minute pinger (e.g. UptimeRobot) on
 ## Knowledge pack
 
 - `knowledge/risk_rules.md` — risk invariants (caps, demo-only, kill switch).
-- `knowledge/playbooks/sweep_fvg_reclaim.md` — the human-readable spec of the
-  encoded setup (Trigger / Confirmation / Stop / Take-profit / Invalidation).
-  Keep it in sync with the constants in `app/strategy.py`.
+- `knowledge/risk_rules.md` — risk invariants (caps, demo-only, kill switch).
 
-Review-report proposals are advisory only; nothing in `knowledge/` is ever
-edited automatically.
+The playbook for the removed strategy is gone with it. Review-report
+proposals are advisory only; nothing in `knowledge/` is ever edited
+automatically.
 
 ## Project structure
 
 ```
 trader/
 ├── app/
-│   ├── main.py          # CLI: run | serve | once | analyze | backtest | status | doctor | kill | resume | review
+│   ├── main.py          # CLI: run | serve | once | status | doctor | kill | resume | review
 │   ├── market_data.py   # shared feed types + MarketDataClient interface (no MT5)
 │   ├── oanda_client.py  # OANDA v20 Practice feed (MAIN)
 │   ├── deriv_client.py  # Deriv WebSocket v3 feed (FALLBACK) + live tick stream
-│   ├── signals.py       # signals pipeline: risk gate → paper sizing → dedupe → Telegram
+│   ├── signals.py       # Signal record shape + paper-balance helper (pipeline removed)
 │   ├── telegram.py      # Telegram Bot API sender (send-only)
 │   ├── http_client.py   # httpx client construction (sandbox proxy-safe)
 │   ├── scanner.py       # live candles + indicators + SMC (FVG/sweep/structure) → snapshots
-│   ├── strategy.py      # deterministic rules engine + Decision schema (no LLM, no network)
-│   ├── brain.py         # decision interface: re-exports Decision/decide, playbook loader
-│   ├── backtest.py      # paper backtester: scanner → strategy → risk on CSV candles
-│   ├── risk.py          # PURE sizing + veto checks (the safety authority)
-│   ├── manage.py        # breakeven logic (retained, parked — no positions in signals-only)
+│   ├── risk.py          # PURE sizing + daily P/L accounting
 │   ├── journal.py       # SQLite (WAL): decisions (orders table stays empty by design)
 │   ├── scheduler.py     # APScheduler wiring + session-hours guard
 │   ├── server.py        # FastAPI dashboard API (health/state/signals/decisions/kill)
 │   ├── review.py        # daily markdown reports (deterministic proposals)
 │   ├── config.py        # typed pydantic config + .env secrets loader
 │   └── web/static/index.html   # single-file dark-theme dashboard
-├── knowledge/           # risk rules + the sweep+FVG playbook
+├── knowledge/           # risk rules (playbook removed with the strategy)
 ├── tests/               # mocked feeds + live Deriv test (marked `live`)
 ├── data/                # runtime: journal.db, KILL_SWITCH (gitignored)
 ├── reports/             # generated daily reports (gitignored)
@@ -193,7 +168,7 @@ trader/
 
 The suite runs mostly offline: mocked OANDA/Telegram HTTP, a mocked Deriv
 transport, and hand-crafted candle fixtures exercise the FVG/sweep/structure
-detectors, the rules engine, sizing, dedupe, and the kill switch. One test
+detectors, sizing, and the kill switch. One test
 (`test_live_tick_and_candles`, marked `live`) hits the real Deriv public
 gateway and is skipped when the network is unavailable.
 

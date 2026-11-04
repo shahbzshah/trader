@@ -47,7 +47,6 @@ class RiskConfig(BaseModel):
     max_open_trades: int = Field(default=3, ge=0)
     max_trades_per_day: int = Field(default=5, ge=0)
     min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
-    default_playbook: str = "sweep_fvg_reclaim"
     breakeven_enabled: bool = True
     breakeven_at_r: float = Field(default=1.0, ge=0.1, le=10.0)
 

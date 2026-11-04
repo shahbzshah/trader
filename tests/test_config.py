@@ -128,7 +128,6 @@ def test_risk_defaults():
     assert r.max_open_trades == 3
     assert r.max_trades_per_day == 5
     assert r.min_confidence == 0.6
-    assert r.default_playbook == "sweep_fvg_reclaim"
     assert r.breakeven_enabled is True
     assert r.breakeven_at_r == 1.0
 
@@ -179,8 +178,7 @@ def test_load_config_uses_overrides(tmp_path, env_path):
         "schedule: {scan_interval_minutes: 5}\n"
         "session_hours: {start: '07:30', end: '16:00', timezone: 'UTC', skip_weekends: true}\n"
         "risk: {max_risk_pct_per_trade: 0.5, max_daily_loss_pct: 2.0, "
-        "max_open_trades: 1, max_trades_per_day: 2, min_confidence: 0.7, "
-        "default_playbook: trend_pullback}\n"
+        "max_open_trades: 1, max_trades_per_day: 2, min_confidence: 0.7}\n"
         "dashboard: {host: '0.0.0.0', port: 9000}\n",
         encoding="utf-8",
     )
@@ -189,7 +187,6 @@ def test_load_config_uses_overrides(tmp_path, env_path):
     assert cfg.schedule.scan_interval_minutes == 5
     assert cfg.risk.max_risk_pct_per_trade == 0.5
     assert cfg.risk.min_confidence == 0.7
-    assert cfg.risk.default_playbook == "trend_pullback"
     assert cfg.dashboard.port == 9000
 
 def test_load_config_ignores_legacy_llm_section(tmp_path, env_path):

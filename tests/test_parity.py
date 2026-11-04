@@ -31,8 +31,7 @@ schedule: {{scan_interval_minutes: 15}}
 session_hours: {{start: '00:00', end: '23:59'}}
 kill_zones: ['07:00-10:00', '12:00-15:00']
 risk: {{max_risk_pct_per_trade: 1.0, max_daily_loss_pct: 3.0,
-       max_open_trades: 3, max_trades_per_day: 5, min_confidence: 0.6,
-       default_playbook: sweep_fvg_reclaim}}
+       max_open_trades: 3, max_trades_per_day: 5, min_confidence: 0.6}}
 news: {{enabled: true, feed_url: 'https://example.invalid/ff.json',
         cache_path: '{(tmp_path / 'news_cache.json').as_posix()}',
         cache_ttl_hours: 12, currencies: [USD], min_impact: High,
@@ -330,7 +329,7 @@ def test_config_shape_and_no_secrets(parity_app):
     assert body["news"]["window_minutes"] == 30
     assert body["news"]["min_impact"] == "High"
     assert body["risk"]["max_risk_pct_per_trade"] == pytest.approx(1.0)
-    assert body["risk"]["default_playbook"] == "sweep_fvg_reclaim"
+    assert "default_playbook" not in body["risk"]
     assert body["signals"]["hypothetical_balance_usd"] == pytest.approx(10000.0)
     assert body["signals"]["max_signals_per_day"] == 5
     blob = json.dumps(body).lower()

@@ -6,7 +6,7 @@ Endpoints:
     GET  /api/signals   recent signaled setups (approved propose decisions)
     GET  /api/decisions?limit=
     GET  /api/candles   recent M15 candles (epoch/open/high/low/close)
-    GET  /api/config    read-only connection + strategy params (no secrets)
+    GET  /api/config    read-only connection + risk params (no secrets)
     POST /explain       store an AI explanation on a signal record
     POST /api/kill
     POST /api/resume
@@ -445,8 +445,7 @@ def create_app(
     def _enrich_signal(row: dict) -> dict:
         """One journaled approved proposal -> dashboard signal dict,
         with paper sizing recomputed from the stored entry/SL/risk%
-        (sizing is not journaled; the formula is the same one
-        signals.size_signal uses: lots = risk$ / (SL$ x 100))."""
+        (sizing is not journaled; lots = risk$ / (SL$ x 100))."""
         try:
             prev = json.loads(row.get("raw_llm_json") or "{}")
         except ValueError:
@@ -470,7 +469,7 @@ def create_app(
         sl_dist = (abs(float(entry) - float(stop_loss))
                    if entry is not None and stop_loss is not None else None)
         if risk_usd is not None and sl_dist:
-            # Same sizing as signals.size_signal: position_size floors
+            # Sizing via position_size: lots = risk$ / (SL$ x 100), floored
             # lots down to the 0.01 volume step (0.0667 -> 0.06), so the
             # dashboard never shows a size the bot would not send.
             lots = position_size(
@@ -867,7 +866,7 @@ def create_app(
 
     @app.get("/api/config")
     def api_config(request: Request) -> Response:
-        """Read-only connection + strategy params for the dashboard.
+        """Read-only connection + risk params for the dashboard.
         No secrets, keys or tokens are ever included here."""
         news_cfg = getattr(cfg, "news", None)
         risk_cfg = getattr(cfg, "risk", None)
@@ -911,9 +910,6 @@ def create_app(
                         getattr(risk_cfg, "max_trades_per_day", 5)),
                     "min_confidence": float(
                         getattr(risk_cfg, "min_confidence", 0.6)),
-                    "default_playbook": getattr(
-                        risk_cfg, "default_playbook",
-                        "sweep_fvg_reclaim"),
                     "breakeven_enabled": bool(
                         getattr(risk_cfg, "breakeven_enabled", True)),
                     "breakeven_at_r": float(

@@ -23,8 +23,7 @@ timeframes: [M15]
 schedule: {{scan_interval_minutes: 15}}
 session_hours: {{start: '00:00', end: '23:59'}}
 risk: {{max_risk_pct_per_trade: 1.0, max_daily_loss_pct: 3.0,
-       max_open_trades: 3, max_trades_per_day: 5, min_confidence: 0.6,
-       default_playbook: sweep_fvg_reclaim}}
+       max_open_trades: 3, max_trades_per_day: 5, min_confidence: 0.6}}
 signals: {{hypothetical_balance_usd: 10000.0, feed: auto,
           telegram_enabled: true, max_signals_per_day: 5}}
 paths: {{data_dir: '{tmp_path.as_posix().replace(chr(92), '/')}',
@@ -224,8 +223,7 @@ timeframes: [M15]
 schedule: {{scan_interval_minutes: 15}}
 session_hours: {{start: '00:00', end: '23:59'}}
 risk: {{max_risk_pct_per_trade: 1.0, max_daily_loss_pct: 3.0,
-       max_open_trades: 3, max_trades_per_day: 5, min_confidence: 0.6,
-       default_playbook: sweep_fvg_reclaim}}
+       max_open_trades: 3, max_trades_per_day: 5, min_confidence: 0.6}}
 news: {{enabled: true, feed_url: 'https://example.invalid/ff.json',
         cache_path: '{(tmp_path / 'news_cache.json').as_posix()}',
         cache_ttl_hours: 12, currencies: [USD], min_impact: High,
@@ -491,7 +489,7 @@ def test_config_endpoint_shape_no_secrets(fake_app):
     assert body["news"]["min_impact"] == "High"
     assert body["news"]["window_minutes"] == 30
     assert body["risk"]["max_risk_pct_per_trade"] == 1.0
-    assert body["risk"]["default_playbook"] == "sweep_fvg_reclaim"
+    assert "default_playbook" not in body["risk"]
     assert body["signals"]["hypothetical_balance_usd"] == 10000.0
     flat = json.dumps(body).lower()
     for banned in ("api_key", "token", "secret", "password"):

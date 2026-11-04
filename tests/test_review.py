@@ -283,8 +283,7 @@ timeframes: [M15]
 schedule: {{scan_interval_minutes: 15}}
 session_hours: {{start: '00:00', end: '23:59'}}
 risk: {{max_risk_pct_per_trade: 1.0, max_daily_loss_pct: 3.0,
-       max_open_trades: 3, max_trades_per_day: 5, min_confidence: 0.6,
-       default_playbook: sweep_fvg_reclaim}}
+       max_open_trades: 3, max_trades_per_day: 5, min_confidence: 0.6}}
 paths: {{data_dir: '{tmp_path.as_posix().replace(chr(92), '/')}',
          logs_dir: '{tmp_path.as_posix().replace(chr(92), '/')}',
          reports_dir: '{(tmp_path / 'reports').as_posix()}',

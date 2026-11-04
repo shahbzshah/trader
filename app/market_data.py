@@ -1,7 +1,7 @@
 """Shared market-data types and the client interface (signals-only).
 
-This module is the single boundary between the rules engine
-(:mod:`app.scanner`, :mod:`app.strategy`, :mod:`app.risk`) and the
+This module is the single boundary between the scanner
+(:mod:`app.scanner`) and risk helpers (:mod:`app.risk`) and the
 market-data providers. It replaces ``app.mt5_client`` — there is no
 MetaTrader5 import anywhere in the signals-only codebase.
 
@@ -67,9 +67,9 @@ class Rates:
 class Tick:
     """Latest quote for a symbol.
 
-    ``spread`` is in *points* (price units / ``point``), matching
-    ``strategy.MAX_SPREAD_POINTS`` — e.g. a $0.35 bid/ask gap on gold
-    (point 0.01) is 35 points. ``None`` when the feed reports no spread.
+    ``spread`` is in *points* (price units / ``point``) — e.g. a $0.35
+    bid/ask gap on gold (point 0.01) is 35 points. ``None`` when the
+    feed reports no spread.
     """
 
     bid: float

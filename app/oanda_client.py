@@ -16,10 +16,10 @@ Endpoints used (read-only — the bot never places orders):
 Notes:
 * OANDA candle ``time`` is RFC 3339; converted to epoch seconds (UTC).
 * OANDA candles carry ``volume`` (tick volume) but no spread; the
-  spread in :class:`Rates` is therefore ``None`` and the strategy's
-  spread filter falls back to the live tick spread (in points).
+  spread in :class:`Rates` is therefore ``None`` and consumers fall
+  back to the live tick spread (in points).
 * The last candle returned is the *forming* bar, same as MT5
-  ``copy_rates`` — the strategy evaluates it as the latest close.
+  ``copy_rates`` — callers treat it as the latest close.
 * ``count`` is clamped to OANDA's 5000-candle limit per request.
 """
 

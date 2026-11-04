@@ -1,25 +1,21 @@
 """End-to-end test of `python -m app.main once` with a fake feed.
 
-Exercises the signals-only acceptance criterion: a full --once cycle on
-a mocked environment must write decision rows and journal a signal for
-a setup — and must NEVER write an order row (there is no execution).
-Decisions come from the deterministic rules engine (no LLM); the fake
-feed serves hand-crafted candles that either trigger the sweep+FVG
-setup or not.
+The strategy was removed on 2026-11-04: a cycle now only keeps the
+feed warm and refreshes candles for the dashboard. It must journal
+nothing, signal nothing, and never write an order row — even when the
+feed serves textbook sweep+FVG setup candles, and even with the kill
+switch engaged.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from app.market_data import Tick
 from tests.fake_client import FakeClient, rates_from_rows
 
 # t0 values chosen so the LAST bar lands inside the 08:00-20:00 UTC session
-# on a weekday: last bar = 2023-11-15 12:00 UTC (Wednesday), inside the
-# 12:00-15:00 UTC New York kill zone.
+# on a weekday: last bar = 2023-11-15 12:00 UTC (Wednesday).
 T0_M15 = 1700049600 - 104 * 900
 T0_H1 = 1700049600 - 72 * 3600
 
@@ -65,8 +61,6 @@ def _setup_fake_with_setup(fake):
         _bullish_m15_rows(), T0_M15, 900, spread=5)
     fake.rates_by_tf[("XAUUSD", "H1")] = rates_from_rows(
         _uptrend_h1_rows(), T0_H1, 3600, spread=5)
-    # Tick at the current price (last close 1.1045) so the buy-limit
-    # entry (~1.103) sits below the ask, as a real limit would.
     fake.tick = Tick(bid=1.1044, ask=1.1045, spread=10.0, time=T0_M15 + 104 * 900)
 
 
@@ -94,11 +88,15 @@ def _load_cfg(tmp_path):
     return cfg
 
 
-def test_once_cycle_writes_decision_and_no_order_for_no_trade(
+def _journal(tmp_path, cfg):
+    from app.journal import Journal
+    return Journal(Path(cfg.paths.data_dir) / "journal.db")
+
+
+def test_once_cycle_scans_but_journals_nothing(
         tmp_path, monkeypatch, capsys):
     cfg = _load_cfg(tmp_path)
 
-    # Flat market: no sweep, no bias -> the rules engine says no_trade.
     fake = _base_fake()
     fake.rates_by_tf[("XAUUSD", "M15")] = rates_from_rows(
         _flat_rows(250), T0_M15, 900, spread=5)
@@ -106,42 +104,33 @@ def test_once_cycle_writes_decision_and_no_order_for_no_trade(
         _flat_rows(72), T0_H1, 3600, spread=5)
     _run_once_main(tmp_path, monkeypatch, cfg, fake)
 
-    from app.journal import Journal
-    j = Journal(Path(cfg.paths.data_dir) / "journal.db")
-    decs = j.list_decisions(limit=20)
-    assert len(decs) >= 1
-    assert all(d["action"] == "no_trade" for d in decs)
-    assert all(d["approved"] for d in decs)
-    # Signals-only: the orders table must stay empty.
+    j = _journal(tmp_path, cfg)
+    assert j.list_decisions(limit=20) == []
+    assert j.list_orders(limit=20) == []
+    out = capsys.readouterr().out
+    assert "decisions=0" in out
+    assert "signals=0" in out
+
+
+def test_once_cycle_setup_candles_still_produce_nothing(
+        tmp_path, monkeypatch, capsys):
+    cfg = _load_cfg(tmp_path)
+
+    # Textbook sweep+FVG candles: with the strategy removed, this must
+    # still produce no decision and no signal.
+    fake = _base_fake()
+    _setup_fake_with_setup(fake)
+    _run_once_main(tmp_path, monkeypatch, cfg, fake)
+
+    j = _journal(tmp_path, cfg)
+    assert j.list_decisions(limit=20) == []
     assert j.list_orders(limit=20) == []
     out = capsys.readouterr().out
     assert "signals=0" in out
 
 
-def test_once_cycle_propose_writes_decision_and_signal_no_order(
+def test_once_cycle_completes_with_kill_switch_engaged(
         tmp_path, monkeypatch, capsys):
-    cfg = _load_cfg(tmp_path)
-
-    fake = _base_fake()
-    _setup_fake_with_setup(fake)
-    _run_once_main(tmp_path, monkeypatch, cfg, fake)
-
-    from app.journal import Journal
-    j = Journal(Path(cfg.paths.data_dir) / "journal.db")
-    decs = j.list_decisions(limit=20)
-    orders = j.list_orders(limit=20)
-
-    propose_decs = [d for d in decs if d["action"] == "propose"]
-    assert len(propose_decs) >= 1
-    assert propose_decs[0]["playbook"] == "sweep_fvg_reclaim"
-    assert all(d["approved"] for d in propose_decs)
-    # No order rows are ever written in signals-only mode.
-    assert orders == []
-    out = capsys.readouterr().out
-    assert "signals=1" in out
-
-
-def test_once_cycle_kill_switch_blocks(tmp_path, monkeypatch):
     cfg = _load_cfg(tmp_path)
     Path(cfg.paths.kill_switch_path).touch()
 
@@ -149,8 +138,8 @@ def test_once_cycle_kill_switch_blocks(tmp_path, monkeypatch):
     _setup_fake_with_setup(fake)
     _run_once_main(tmp_path, monkeypatch, cfg, fake)
 
-    from app.journal import Journal
-    j = Journal(Path(cfg.paths.data_dir) / "journal.db")
+    j = _journal(tmp_path, cfg)
     assert j.list_orders(limit=20) == []
-    decs = j.list_decisions(limit=20)
-    assert any("kill_switch_engaged" in d["reject_reasons"] for d in decs)
+    assert j.list_decisions(limit=20) == []
+    out = capsys.readouterr().out
+    assert "signals=0" in out

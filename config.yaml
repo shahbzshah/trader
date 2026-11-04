@@ -28,7 +28,6 @@ risk:
   max_open_trades: 3
   max_trades_per_day: 5
   min_confidence: 0.6
-  default_playbook: sweep_fvg_reclaim
   breakeven_enabled: true   # move SL to entry once a position is +breakeven_at_r R
   breakeven_at_r: 1.0
 
