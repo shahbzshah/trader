@@ -48,7 +48,11 @@ strategy:
     min_sep_813_usd: 0.75   # |ma8 - ma13| >= $0.75 at the signal bar
     stop_usd: 10.0          # Megah's standing stop loss, always $10
     warmup_bars: 300        # bars discarded (EMA + structure warmup)
-    history_bars: 400       # M15 bars fetched per cycle (warmup + margin)
+    history_bars: 1000      # M15 bars fetched per cycle. MUST be 1000, not 400:
+                          # Deriv's count counts calendar 15-min slots, and
+                          # weekends/nightly breaks return nothing, so 400
+                          # only brings back ~285 bars — below the 300 warmup,
+                          # and the bot can never fire (found 2026-11-11).
 
 news:
   enabled: true

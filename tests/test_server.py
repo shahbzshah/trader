@@ -628,7 +628,7 @@ def test_config_endpoint_includes_strategy(fake_app):
     assert phil["min_sep_813_usd"] == pytest.approx(0.75)
     assert phil["stop_usd"] == pytest.approx(10.0)
     assert phil["warmup_bars"] == 300
-    assert phil["history_bars"] == 400
+    assert phil["history_bars"] == 1000
     flat = json.dumps(body).lower()
     for banned in ("api_key", "token", "secret", "password"):
         assert banned not in flat

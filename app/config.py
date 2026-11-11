@@ -79,7 +79,11 @@ class PhilRudyConfig(BaseModel):
     min_sep_813_usd: float = Field(default=0.75, ge=0.0)
     stop_usd: float = Field(default=10.0, ge=0.0)
     warmup_bars: int = Field(default=300, ge=0)
-    history_bars: int = Field(default=400, ge=1)
+    # 1000, not 400: Deriv's count counts calendar 15-min slots and
+    # closed-market slots return nothing, so 400 only brings back
+    # ~285 bars — below the 300 warmup, and the bot can never fire
+    # (found 2026-11-11). 1000 returns ~706 bars.
+    history_bars: int = Field(default=1000, ge=1)
 
 
 class StrategyConfig(BaseModel):

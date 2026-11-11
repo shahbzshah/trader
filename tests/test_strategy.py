@@ -189,7 +189,7 @@ def test_strategy_config_defaults(tmp_path):
     assert cfg.strategy.phil_rudy.min_sep_813_usd == pytest.approx(0.75)
     assert cfg.strategy.phil_rudy.stop_usd == pytest.approx(10.0)
     assert cfg.strategy.phil_rudy.warmup_bars == 300
-    assert cfg.strategy.phil_rudy.history_bars == 400
+    assert cfg.strategy.phil_rudy.history_bars == 1000
     assert cfg.risk.breakeven_enabled is False
 
 
