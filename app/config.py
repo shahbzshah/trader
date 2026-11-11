@@ -65,6 +65,28 @@ class SignalsConfig(BaseModel):
     max_signals_per_day: int = Field(default=5, ge=0)
 
 
+class PhilRudyConfig(BaseModel):
+    """Phil v2 + RUDY trend filter ("V2 pair", live 2026-11-11).
+
+    Values are the backtested ones; do not tune without a fresh
+    backtest. max_dist_usd / min_sep_813_usd are the Phil v2 gates,
+    stop_usd is Megah's standing $10 stop, warmup_bars discards the
+    first bars (EMAs + RUDY structure need history), history_bars is
+    how many M15 bars each cycle fetches.
+    """
+
+    max_dist_usd: float = Field(default=20.0, ge=0.0)
+    min_sep_813_usd: float = Field(default=0.75, ge=0.0)
+    stop_usd: float = Field(default=10.0, ge=0.0)
+    warmup_bars: int = Field(default=300, ge=0)
+    history_bars: int = Field(default=400, ge=1)
+
+
+class StrategyConfig(BaseModel):
+    name: str = "phil-rudy-v2"
+    phil_rudy: PhilRudyConfig = PhilRudyConfig()
+
+
 class DashboardConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = Field(default=8765, ge=1, le=65535)
@@ -104,6 +126,7 @@ class AppConfig(BaseModel):
     kill_zones: list[str] = Field(default_factory=list)
     risk: RiskConfig = RiskConfig()
     news: NewsConfig = NewsConfig()
+    strategy: StrategyConfig = StrategyConfig()
     signals: SignalsConfig = SignalsConfig()
     dashboard: DashboardConfig = DashboardConfig()
     paths: PathsConfig = PathsConfig()
@@ -199,9 +222,11 @@ __all__ = [
     "EnvSecrets",
     "NewsConfig",
     "PathsConfig",
+    "PhilRudyConfig",
     "RiskConfig",
     "ScheduleConfig",
     "SessionHoursConfig",
     "SignalsConfig",
+    "StrategyConfig",
     "load_config",
 ]

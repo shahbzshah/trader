@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.journal import Journal
+from app.market_data import Tick
 from app.server import create_app
 from tests.fake_client import FakeClient
 
@@ -512,3 +513,122 @@ def test_dashboard_has_chart_config_and_server_stats(fake_app):
     # No external URLs: fonts + Tailwind stay self-hosted.
     assert "https://" not in body
     assert "http://" not in body
+
+
+# --- phil-rudy-v2: no take-profit (SL-only) + FLIP outcomes ----------
+
+def test_signal_without_tp_resolves_sl_only(fake_app):
+    """A phil-rudy-v2 signal (take_profit None) resolves on the stop
+    alone: a candle through the SL closes at -1.0R, and nothing else
+    can resolve it."""
+    from tests.fake_client import rates_from_rows
+    import time as _time
+
+    _, client, tmp_path, fake = fake_app
+    _record_signal(tmp_path, tp=None)
+    t0 = int(_time.time()) + 900
+    fake.rates_by_tf[("XAUUSD", "M15")] = rates_from_rows(
+        [(3900.0, 3905.0, 3880.0, 3890.0)], t0=t0, step=900)
+    sig = client.get("/api/signals").json()["signals"][0]
+    assert sig["status"] == "SL"
+    assert sig["r"] == pytest.approx(-1.0)
+    assert sig["close_price"] == pytest.approx(3885.0)
+    assert sig["take_profit"] is None
+    assert sig["rr"] is None
+    # SL distance $15 at 1% risk -> 0.06 lots, $100 at risk.
+    assert sig["lots"] == pytest.approx(0.06)
+    assert sig["risk_usd"] == pytest.approx(100.0)
+
+
+def test_signal_without_tp_tick_resolves_sl_not_tp(fake_app):
+    import time as _time
+
+    _, client, tmp_path, fake = fake_app
+    _record_signal(tmp_path, tp=None)
+    # Tick far above the entry (where a TP would have been) must NOT
+    # resolve a TP-less signal.
+    fake.tick = Tick(bid=3950.0, ask=3950.10, spread=10.0,
+                     time=int(_time.time()))
+    sig = client.get("/api/signals").json()["signals"][0]
+    assert sig["status"] == "OPEN"
+    # Tick through the stop resolves SL immediately.
+    fake.tick = Tick(bid=3880.0, ask=3880.10, spread=10.0,
+                     time=int(_time.time()))
+    sig = client.get("/api/signals").json()["signals"][0]
+    assert sig["status"] == "SL"
+    assert sig["r"] == pytest.approx(-1.0)
+    # A later poll never reverts it to OPEN.
+    sig = client.get("/api/signals").json()["signals"][0]
+    assert sig["status"] == "SL"
+
+
+def test_flip_outcome_survives_polls_and_counts_in_stats(fake_app):
+    """A FLIP record written by the runner (snapshot) is picked up by
+    the next poll, memoized, and counted as a closed win in stats —
+    never reverted to OPEN."""
+    from app.history import append_archive, snapshot_path, write_snapshot
+
+    _, client, tmp_path, _ = fake_app
+    _record_signal(tmp_path, tp=None)
+    j = Journal(tmp_path / "journal.db")
+    dec_id = j.list_decisions(limit=5)[0]["id"]
+    rec = {
+        "id": dec_id, "ts": j.list_decisions(limit=5)[0]["ts"],
+        "symbol": "XAUUSD", "direction": "buy", "entry": 3900.0,
+        "stop_loss": 3885.0, "take_profit": None, "risk_pct": 1.0,
+        "lots": 0.06, "risk_usd": 100.0, "per_dollar_usd": 6.0,
+        "rr": None, "confidence": 0.85, "playbook": "phil-rudy-v2",
+        "reasoning": "flip test", "status": "FLIP",
+        "close_ts": j.list_decisions(limit=5)[0]["ts"] + 900,
+        "close_price": 3930.0, "r": 1.5,
+        "explanation": None, "explanation_model": None,
+        "explanation_ts": None,
+    }
+    snap = snapshot_path(tmp_path)
+    write_snapshot(snap, [rec])
+    append_archive(tmp_path / "signal_history.jsonl", rec)
+
+    for _ in range(2):  # two polls: no revert on the second
+        sig = client.get("/api/signals").json()["signals"][0]
+        assert sig["status"] == "FLIP"
+        assert sig["r"] == pytest.approx(1.5)
+        assert sig["close_price"] == pytest.approx(3930.0)
+    stats = client.get("/api/state").json()["stats"]
+    assert stats["total_signals"] == 1
+    assert stats["closed"] == 1
+    assert stats["wins"] == 1
+    assert stats["hit_rate"] == 1.0
+    assert stats["net_r"] == pytest.approx(1.5)
+
+
+def test_valid_record_accepts_tp_none_and_flip():
+    from app.history import valid_record
+
+    base = {
+        "id": 1, "ts": 1700000000, "symbol": "XAUUSD",
+        "direction": "buy", "entry": 3900.0, "stop_loss": 3885.0,
+        "take_profit": None, "status": "FLIP", "close_ts": 1700000900,
+        "close_price": 3930.0, "r": 1.5,
+    }
+    assert valid_record(base) is True
+    assert valid_record({**base, "status": "OPEN"}) is True
+    assert valid_record({**base, "take_profit": 3930.0,
+                         "status": "TP"}) is True
+    assert valid_record({**base, "entry": None}) is False
+    assert valid_record({**base, "status": "PENDING"}) is False
+
+
+def test_config_endpoint_includes_strategy(fake_app):
+    _, client, _, _ = fake_app
+    body = client.get("/api/config").json()
+    strat = body["strategy"]
+    assert strat["name"] == "phil-rudy-v2"
+    phil = strat["phil_rudy"]
+    assert phil["max_dist_usd"] == pytest.approx(20.0)
+    assert phil["min_sep_813_usd"] == pytest.approx(0.75)
+    assert phil["stop_usd"] == pytest.approx(10.0)
+    assert phil["warmup_bars"] == 300
+    assert phil["history_bars"] == 400
+    flat = json.dumps(body).lower()
+    for banned in ("api_key", "token", "secret", "password"):
+        assert banned not in flat

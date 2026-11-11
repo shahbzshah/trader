@@ -10,6 +10,7 @@ htmlcov/
 data/KILL_SWITCH
 data/journal.db
 data/journal.db-*
+data/open_position.json
 logs/*.log
 reports/*.md
 !reports/.gitkeep

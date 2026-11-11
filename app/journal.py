@@ -504,6 +504,51 @@ class Journal:
             finally:
                 conn.close()
 
+    # --- positions history ---------------------------------------------
+
+    def list_positions_history(
+        self,
+        *,
+        since_ts: int | None = None,
+        limit: int = 1000,
+    ) -> list[dict]:
+        """Closed-position rows (record_position_close), oldest first.
+
+        Used by the daily-loss halt: realised P/L for the current UTC
+        day is the sum of ``profit`` over rows whose ``close_ts`` is
+        today.
+        """
+        sql = "SELECT * FROM positions_history"
+        args: list[Any] = []
+        if since_ts is not None:
+            sql += " WHERE close_ts >= ?"
+            args.append(int(since_ts))
+        sql += " ORDER BY close_ts ASC, id ASC LIMIT ?"
+        args.append(int(limit))
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(sql, args).fetchall()
+            finally:
+                conn.close()
+        return [
+            {
+                "id": int(r["id"]),
+                "open_ts": (None if r["open_ts"] is None else int(r["open_ts"])),
+                "close_ts": (None if r["close_ts"] is None else int(r["close_ts"])),
+                "ticket": (None if r["ticket"] is None else int(r["ticket"])),
+                "symbol": str(r["symbol"]),
+                "direction": str(r["direction"]),
+                "volume": (None if r["volume"] is None else float(r["volume"])),
+                "price_open": (None if r["price_open"] is None else float(r["price_open"])),
+                "price_close": (None if r["price_close"] is None else float(r["price_close"])),
+                "sl": (None if r["sl"] is None else float(r["sl"])),
+                "tp": (None if r["tp"] is None else float(r["tp"])),
+                "profit": (None if r["profit"] is None else float(r["profit"])),
+            }
+            for r in rows
+        ]
+
     # --- introspection --------------------------------------------------
 
     def is_kill_switch_engaged(self, kill_switch_path: Path | str) -> bool:

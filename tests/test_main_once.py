@@ -1,15 +1,18 @@
 """End-to-end test of `python -m app.main once` with a fake feed.
 
-The strategy was removed on 2026-11-04: a cycle now only keeps the
-feed warm and refreshes candles for the dashboard. It must journal
-nothing, signal nothing, and never write an order row — even when the
-feed serves textbook sweep+FVG setup candles, and even with the kill
-switch engaged.
+The phil-rudy-v2 strategy is live (2026-11-11): a cycle evaluates
+the last closed M15 bar. Non-signal bars still journal nothing —
+even textbook sweep+FVG setup candles (the old strategy is gone),
+and even with the kill switch engaged. Signal bars fire exactly
+once, honour the gates, and flip / stop-out correctly; the
+frozen-data tests below prove that against real backtested bars.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+
+import pytest
 
 from app.market_data import Tick
 from tests.fake_client import FakeClient, rates_from_rows
@@ -116,7 +119,8 @@ def test_once_cycle_setup_candles_still_produce_nothing(
         tmp_path, monkeypatch, capsys):
     cfg = _load_cfg(tmp_path)
 
-    # Textbook sweep+FVG candles: with the strategy removed, this must
+    # Textbook sweep+FVG candles, but only 105 bars: below the 300-bar
+    # warmup, so the strategy cannot evaluate a signal bar and must
     # still produce no decision and no signal.
     fake = _base_fake()
     _setup_fake_with_setup(fake)
@@ -141,5 +145,223 @@ def test_once_cycle_completes_with_kill_switch_engaged(
     j = _journal(tmp_path, cfg)
     assert j.list_orders(limit=20) == []
     assert j.list_decisions(limit=20) == []
+    out = capsys.readouterr().out
+    assert "signals=0" in out
+
+
+# --- phil-rudy-v2 end-to-end (frozen Deriv M15 bars) ----------------------
+#
+# Bar references (verified against ~/workspace/trading/... backtests):
+#   bar 499: first V2 buy, epoch 1772598600, close 5161.77; its $10
+#            stop is hit on bar 505 (backtest stop trade, pnl -$10.50).
+#   bar 823: V2 buy; bar 965: the opposite V2 sell that flips it
+#            (backtest flip trade, pnl +$79.98 per lot).
+#   bar 702: a Phil triangle whose RUDY trend disagrees (sell, itrend
+#            +1) — filtered out, must fire nothing.
+
+_FROZEN = Path.home() / "workspace/trading/phil-backtest/gold-m15.json"
+
+
+def _load_frozen_bars():
+    import json as _json
+
+    if not _FROZEN.exists():
+        pytest.skip(f"frozen data not present: {_FROZEN}")
+    return _json.loads(_FROZEN.read_text(encoding="utf-8"))
+
+
+def _frozen_fake(upto_bar: int, tick_time: int | None = None):
+    """FakeClient serving frozen bars 0..upto_bar-1 with their real
+    epochs (weekend gaps preserved — uniform-step builders would
+    shift every epoch and break the dedup assertions)."""
+    from app.market_data import Rates
+
+    bars = _load_frozen_bars()
+    fake = FakeClient()
+    fake.rates_by_tf[("XAUUSD", "M15")] = Rates(rates=[
+        {"time": int(b["epoch"]), "open": float(b["open"]),
+         "high": float(b["high"]), "low": float(b["low"]),
+         "close": float(b["close"]), "tick_volume": 0,
+         "spread": None, "real_volume": 0}
+        for b in bars[:upto_bar]
+    ])
+    last = bars[upto_bar - 1]
+    fake.tick = Tick(bid=float(last["close"]),
+                     ask=float(last["close"]) + 0.05, spread=5.0,
+                     time=int(tick_time or last["epoch"]) + 900)
+    return fake
+
+
+def _open_position(tmp_path, cfg):
+    path = Path(cfg.paths.data_dir) / "open_position.json"
+    if not path.exists():
+        return None
+    import json as _json
+
+    return _json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_once_v2_buy_fires_exactly_once(tmp_path, monkeypatch, capsys):
+    cfg = _load_cfg(tmp_path)
+    _run_once_main(tmp_path, monkeypatch, cfg, _frozen_fake(500))
+
+    j = _journal(tmp_path, cfg)
+    decisions = j.list_decisions(limit=20)
+    assert len(decisions) == 1
+    row = decisions[0]
+    assert row["action"] == "propose" and row["approved"] is True
+    assert row["playbook"] == "phil-rudy-v2"
+    assert row["confidence"] == pytest.approx(0.48)
+    assert row["ts"] == 1772598600
+    import json as _json
+
+    prev = _json.loads(row["raw_llm_json"])
+    assert prev["direction"] == "buy"
+    assert prev["price"] == pytest.approx(5161.77)
+    assert prev["stop_loss"] == pytest.approx(5151.77)
+    assert prev["take_profit"] is None
+    assert "RUDY itrend +1 agrees" in row["reasoning"]
+    assert "no take-profit" in row["reasoning"]
+
+    pos = _open_position(tmp_path, cfg)
+    assert pos is not None
+    assert pos["direction"] == "buy"
+    assert pos["entry"] == pytest.approx(5161.77)
+    assert pos["stop_loss"] == pytest.approx(5151.77)
+    assert pos["lots"] == pytest.approx(0.10)
+    assert pos["decision_id"] == row["id"]
+    out = capsys.readouterr().out
+    assert "decisions=1" in out and "signals=1" in out
+
+    # Second run of the same bar: duplicate, nothing new journaled.
+    _run_once_main(tmp_path, monkeypatch, cfg, _frozen_fake(500))
+    assert len(j.list_decisions(limit=20)) == 1
+    out = capsys.readouterr().out
+    assert "duplicates=1" in out and "signals=0" in out
+
+
+def test_once_v2_buy_blocked_by_kill_switch(tmp_path, monkeypatch, capsys):
+    cfg = _load_cfg(tmp_path)
+    Path(cfg.paths.kill_switch_path).touch()
+    _run_once_main(tmp_path, monkeypatch, cfg, _frozen_fake(500))
+
+    j = _journal(tmp_path, cfg)
+    decisions = j.list_decisions(limit=20)
+    assert len(decisions) == 1
+    assert decisions[0]["action"] == "no_trade"
+    assert decisions[0]["approved"] is False
+    assert "kill switch" in decisions[0]["reject_reasons"][0]
+    assert _open_position(tmp_path, cfg) is None
+    out = capsys.readouterr().out
+    assert "signals=0" in out and "rejected=1" in out
+
+
+def test_once_v2_buy_blocked_by_blackout(tmp_path, monkeypatch, capsys):
+    import datetime as _dt
+
+    from app import news as news_mod
+
+    cfg = _load_cfg(tmp_path)
+    event = news_mod.CalEvent(
+        title="CPI m/m", currency="USD",
+        time_utc=_dt.datetime.now(_dt.timezone.utc), impact="High")
+    monkeypatch.setattr(news_mod, "current_blackout",
+                        lambda *a, **k: event)
+    _run_once_main(tmp_path, monkeypatch, cfg, _frozen_fake(500))
+
+    j = _journal(tmp_path, cfg)
+    decisions = j.list_decisions(limit=20)
+    assert len(decisions) == 1
+    assert decisions[0]["action"] == "no_trade"
+    assert decisions[0]["approved"] is False
+    assert "blackout" in decisions[0]["reject_reasons"][0]
+    assert _open_position(tmp_path, cfg) is None
+    out = capsys.readouterr().out
+    assert "signals=0" in out and "rejected=1" in out
+
+
+def test_once_disagreeing_phil_fires_nothing(tmp_path, monkeypatch, capsys):
+    cfg = _load_cfg(tmp_path)
+    _run_once_main(tmp_path, monkeypatch, cfg, _frozen_fake(703))
+
+    j = _journal(tmp_path, cfg)
+    assert j.list_decisions(limit=20) == []
+    out = capsys.readouterr().out
+    assert "signals=0" in out
+
+
+def test_once_flip_closes_and_opens(tmp_path, monkeypatch, capsys):
+    bars = _load_frozen_bars()
+    cfg = _load_cfg(tmp_path)
+
+    # Long opens at bar 823 (buy 5117.91 per the frozen data).
+    _run_once_main(tmp_path, monkeypatch, cfg, _frozen_fake(824))
+    j = _journal(tmp_path, cfg)
+    assert len(j.list_decisions(limit=20)) == 1
+    entry = float(bars[823]["close"])
+    assert entry == pytest.approx(5117.91)
+
+    # Bar 965 is the opposite V2 sell: closes the long at the flip
+    # and opens the short. No V2 signal and no stop hit in between.
+    _run_once_main(tmp_path, monkeypatch, cfg, _frozen_fake(966))
+    decisions = j.list_decisions(limit=20)
+    assert len([d for d in decisions if d["action"] == "propose"]) == 2
+    closes = j.list_positions_history()
+    assert len(closes) == 1
+    close = closes[0]
+    exit_px = float(bars[965]["close"])
+    assert close["direction"] == "buy"
+    assert close["price_open"] == pytest.approx(entry)
+    assert close["price_close"] == pytest.approx(exit_px)
+    assert close["profit"] == pytest.approx(
+        (exit_px - entry) * 0.10 * 100.0 - 0.50)
+    # The close is ticketed with the journal id of the signal that
+    # opened the position (the older of the two decisions: the list
+    # is newest-first, so the buy is decisions[-1]).
+    assert close["ticket"] == decisions[-1]["id"]
+    assert decisions[-1]["ts"] == int(bars[823]["epoch"])
+
+    # FLIP outcome written to the durable history (dashboard ledger).
+    from app.history import load_snapshot
+
+    recs = load_snapshot(Path(cfg.paths.data_dir) / "history_snapshot.json")
+    flips = [r for r in recs if r["status"] == "FLIP"]
+    assert len(flips) == 1
+    assert flips[0]["close_price"] == pytest.approx(exit_px)
+    assert flips[0]["close_ts"] == int(bars[965]["epoch"])
+    assert flips[0]["take_profit"] is None
+    assert flips[0]["r"] == pytest.approx(close["profit"] / 100.0)
+
+    # The short is now the open position.
+    pos = _open_position(tmp_path, cfg)
+    assert pos is not None
+    assert pos["direction"] == "sell"
+    assert pos["entry"] == pytest.approx(exit_px)
+    assert pos["stop_loss"] == pytest.approx(exit_px + 10.0)
+    out = capsys.readouterr().out
+    assert "signals=1" in out
+
+
+def test_once_stop_out_closes_position(tmp_path, monkeypatch, capsys):
+    cfg = _load_cfg(tmp_path)
+
+    # Long opens at bar 499 (buy 5161.77, SL 5151.77).
+    _run_once_main(tmp_path, monkeypatch, cfg, _frozen_fake(500))
+    assert _open_position(tmp_path, cfg) is not None
+
+    # Bar 505 runs through the stop (backtest stop trade, -$10.50
+    # per lot): the position closes, no new signal fires on bar 505.
+    _run_once_main(tmp_path, monkeypatch, cfg, _frozen_fake(506))
+    j = _journal(tmp_path, cfg)
+    closes = j.list_positions_history()
+    assert len(closes) == 1
+    close = closes[0]
+    assert close["direction"] == "buy"
+    assert close["price_close"] == pytest.approx(5151.77)
+    assert close["profit"] == pytest.approx(-100.50)
+    assert _open_position(tmp_path, cfg) is None
+    # Only the original propose decision exists — the stop close
+    # journals a position row, not a new decision.
+    assert len(j.list_decisions(limit=20)) == 1
     out = capsys.readouterr().out
     assert "signals=0" in out

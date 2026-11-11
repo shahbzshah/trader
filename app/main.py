@@ -2,10 +2,13 @@
 
 Signals-only bot: no MT5, no trade execution. The runner keeps the
 market feed warm (OANDA v20 Practice first, Deriv WebSocket as
-fallback) and serves the dashboard. The strategy was removed on
-2026-11-04 (Megah's order): no strategy runs, no decisions are made,
-no signals fire until the new approach lands. The scan loop still
-runs so the feed, candles and dashboard stay live.
+fallback) and serves the dashboard.
+
+Strategy (live 2026-11-11, Megah's order "combine the 2"): Phil v2
+triangles filtered by RUDY's internal trend — see app/strategy.py
+and knowledge/playbooks/phil_rudy_v2.md. One open position max;
+winners exit at the opposite filtered signal (flip), losses at
+Megah's $10 stop; there is no take-profit and no breakeven manager.
 
 Commands:
     run      continuous scan loop (APScheduler) — local use
@@ -22,10 +25,12 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import json
 import logging
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from app.config import EnvSecrets, load_config
 from app.market_data import MarketDataClient, MarketDataError, Rates
@@ -272,7 +277,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
 
 def _cmd_once(args: argparse.Namespace) -> int:
-    """Single cycle: feed check + candle refresh. No strategy runs."""
+    """Single cycle: feed check + candle refresh + Phil+RUDY strategy."""
     cfg = load_config(args.config)
     components = _build_components(args, cfg)
     if components is None:
@@ -293,8 +298,7 @@ def _build_components(args: argparse.Namespace, cfg):
     """Construct feed client, journal and Telegram alerter.
 
     Returns None and prints a clean error if no market feed can be
-    reached. No signal engine exists any more: the strategy was
-    removed on 2026-11-04, so there is nothing to turn into signals.
+    reached.
     """
     from app.journal import Journal
     from app.telegram import TelegramAlerter
@@ -334,40 +338,393 @@ def _build_components(args: argparse.Namespace, cfg):
 
 
 
-def run_once(components: dict) -> dict:
-    """One scan cycle. Returns a small result dict for callers/tests.
+def _open_position_path(cfg) -> Path:
+    """Durable open-position state (one position max, per the backtest
+    trade engine). Lives in the data dir next to the journal."""
+    return Path(cfg.paths.data_dir) / "open_position.json"
 
-    The strategy was removed on 2026-11-04, so a cycle only keeps the
-    feed warm and refreshes candles for the dashboard: it scans the
-    watchlist (which pulls fresh candles + ticks) and logs an active
-    news blackout if one applies. No decision is made, nothing is
-    journaled, no signal fires.
+
+def _load_open_position(path: Path) -> dict | None:
+    """Read the open position, or None. A corrupt/partial file is
+    treated as no position (and logged) — never crash a cycle on it."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return {
+            "bar_epoch": int(raw["bar_epoch"]),
+            "decision_id": int(raw["decision_id"]),
+            "direction": str(raw["direction"]),
+            "entry": float(raw["entry"]),
+            "stop_loss": float(raw["stop_loss"]),
+            "lots": float(raw["lots"]),
+        }
+    except (KeyError, TypeError, ValueError):
+        logger.warning("open position file %s is malformed; ignoring", path)
+        return None
+
+
+def _save_open_position(path: Path, pos: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(pos, sort_keys=True), encoding="utf-8")
+
+
+def _clear_open_position(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _usable_bar(row: Any) -> bool:
+    """True when a candle row has finite OHLC + time values."""
+    try:
+        for key in ("time", "open", "high", "low", "close"):
+            value = float(row[key])
+            if value != value or value in (float("inf"), float("-inf")):
+                return False
+        return True
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _close_position(*, journal, pos: dict, exit_price: float,
+                    exit_ts: int, reason: str) -> float:
+    """Record a paper close in the journal; return realised profit ($).
+
+    profit = (exit - entry) * direction * lots * 100 - $0.50 spread,
+    with direction +1 for buy / -1 for sell. The ticket is the journal
+    decision id of the signal that opened the position, so the
+    dashboard can match a close to its signal.
     """
-    from app.scanner import scan_watchlist
+    direction = pos["direction"]
+    sign = 1 if direction == "buy" else -1
+    profit = ((float(exit_price) - float(pos["entry"])) * sign
+              * float(pos["lots"]) * 100.0 - 0.50)
+    journal.record_position_close(
+        symbol="XAUUSD",
+        direction=direction,
+        volume=float(pos["lots"]),
+        price_open=float(pos["entry"]),
+        price_close=float(exit_price),
+        profit=profit,
+        ticket=int(pos["decision_id"]),
+        sl=float(pos["stop_loss"]),
+        tp=None,
+        open_ts=int(pos["bar_epoch"]),
+        close_ts=int(exit_ts),
+    )
+    logger.info("position closed (%s): %s %.2f -> %.2f, profit $%.2f",
+                reason, direction, pos["entry"], exit_price, profit)
+    return profit
 
-    cfg = components["cfg"]
 
-    snapshots = scan_watchlist(components["client"], cfg)
+def _write_flip_history(cfg, journal, decision_id: int, close_ts: int,
+                        close_price: float, r_value: float | None,
+                        risk_usd: float, lots: float) -> None:
+    """Write a FLIP outcome for one signal into the durable history
+    (snapshot + append-only archive, app/history.py) so the dashboard
+    ledger shows the flip close. Best-effort: a failure here must
+    never break the cycle (the journal close above is the record)."""
+    try:
+        from app.history import (
+            append_archive,
+            archive_path,
+            load_snapshot,
+            snapshot_path,
+            write_snapshot,
+        )
+
+        row = journal.get_decision(decision_id)
+        if row is None:
+            return
+        try:
+            prev = json.loads(row.get("raw_llm_json") or "{}")
+        except ValueError:
+            prev = {}
+        if not isinstance(prev, dict):
+            prev = {}
+        rec = {
+            "id": int(decision_id),
+            "ts": int(row["ts"]),
+            "symbol": row["symbol"],
+            "direction": prev.get("direction"),
+            "entry": prev.get("price"),
+            "stop_loss": prev.get("stop_loss"),
+            "take_profit": None,
+            "risk_pct": prev.get("risk_pct"),
+            "lots": float(lots),
+            "risk_usd": float(risk_usd),
+            "per_dollar_usd": float(lots) * 100.0,
+            "rr": None,
+            "confidence": row.get("confidence"),
+            "playbook": row.get("playbook"),
+            "reasoning": row.get("reasoning"),
+            "status": "FLIP",
+            "close_ts": int(close_ts),
+            "close_price": float(close_price),
+            "r": r_value,
+            "explanation": None,
+            "explanation_model": None,
+            "explanation_ts": None,
+        }
+        data_dir = Path(cfg.paths.data_dir)
+        snap = snapshot_path(data_dir)
+        records = [x for x in load_snapshot(snap)
+                   if x["id"] != int(decision_id)]
+        records.append(rec)
+        write_snapshot(snap, records)
+        append_archive(archive_path(data_dir), rec)
+    except Exception as exc:  # noqa: BLE001 - best-effort history write
+        logger.warning("could not write FLIP history for signal %d: %s",
+                       decision_id, exc)
+
+
+def run_once(components: dict) -> dict:
+    """One scan cycle: feed warm-up + Phil+RUDY strategy.
+
+    Returns a small result dict for callers/tests (decisions /
+    signals / duplicates / rejected this cycle).
+
+    Flow, in order:
+    1. scan_watchlist keeps the feed warm and refreshes dashboard
+       candles (unchanged).
+    2. Fetch 400 M15 bars; drop the forming bar (now < bar_time +
+       900s). Only the last CLOSED bar is evaluated for a signal.
+    3. If a position is open, check every closed bar after its entry
+       bar for the $10 stop (fill at the stop, or at the bar's open
+       on a gap through it). A stop close still lets a flip signal
+       on the same bar open the next position.
+    4. Evaluate the last closed bar (Phil v2 + RUDY itrend). No
+       signal -> nothing journaled.
+    5. Dedup by signal-bar epoch (journal).
+    6. Gates, in order: kill switch, news blackout (High USD ±30
+       min, fail-open), max_signals_per_day, daily-loss halt
+       (max_daily_loss_pct of the hypothetical balance). A gated
+       signal is journaled as a rejected no_trade decision.
+    7. Same-direction signal while open is ignored. Opposite signal
+       closes the open position at the new signal's entry (flip) and
+       opens the new one. Sizing is 1% risk via position_size with
+       the $10 SL (0.10 lots on $10,000).
+    """
+    import json as _json
+    import time as _time
 
     from app import news as news_mod
+    from app.market_data import XAUUSD_SPEC
+    from app.risk import position_size
+    from app.scanner import scan_watchlist
+    from app.signals import Signal
+    from app.strategy import CONFIDENCE, PLAYBOOK, evaluate_last_bar
+    from app.telegram import format_signal_text
+
+    cfg = components["cfg"]
+    journal = components["journal"]
+    client = components["client"]
+    telegram = components.get("telegram")
+    feed = components.get("feed", "unknown")
+    result = {"decisions": 0, "signals": 0, "duplicates": 0, "rejected": 0}
+
+    snapshots = scan_watchlist(client, cfg)
 
     blackout = news_mod.current_blackout(cfg)
     if blackout is not None:
         logger.warning(
-            "news blackout active: %s (%s) at %s UTC — no strategy to stand down",
+            "news blackout active: %s (%s) at %s UTC",
             blackout.title,
             blackout.currency,
             blackout.time_utc.strftime("%H:%M"),
         )
-    else:
-        logger.info("scan cycle complete: %d symbol(s), no strategy configured",
-                    len(snapshots))
-    return {
-        "decisions": 0,
-        "signals": 0,
-        "duplicates": 0,
-        "rejected": 0,
-    }
+
+    strat = getattr(cfg, "strategy", None)
+    phil = getattr(strat, "phil_rudy", None) if strat is not None else None
+    warmup = int(getattr(phil, "warmup_bars", 300))
+    history_bars = int(getattr(phil, "history_bars", 400))
+    max_dist = float(getattr(phil, "max_dist_usd", 20.0))
+    min_sep = float(getattr(phil, "min_sep_813_usd", 0.75))
+    stop_usd = float(getattr(phil, "stop_usd", 10.0))
+
+    try:
+        rates = client.copy_rates("XAUUSD", "M15", history_bars)
+    except Exception as exc:  # noqa: BLE001 - feed failure skips strategy
+        logger.warning("strategy M15 fetch failed: %s", exc)
+        return result
+    rows = rates.rates if hasattr(rates, "rates") else list(rates)
+    bars = sorted(
+        (r for r in rows if _usable_bar(r)),
+        key=lambda r: int(r["time"]),
+    )
+    now = int(_time.time())
+    closed = [b for b in bars if now >= int(b["time"]) + 900]
+    if len(closed) <= warmup:
+        logger.info(
+            "scan cycle complete: %d symbol(s), %d closed M15 bars "
+            "(warmup %d, no signal possible yet)",
+            len(snapshots), len(closed), warmup)
+        return result
+
+    pos_path = _open_position_path(cfg)
+    pos = _load_open_position(pos_path)
+
+    # --- $10 stop check on closed bars after the entry bar ---
+    if pos is not None:
+        for bar in closed:
+            if int(bar["time"]) <= int(pos["bar_epoch"]):
+                continue
+            sl = float(pos["stop_loss"])
+            direction = pos["direction"]
+            hit = (float(bar["low"]) <= sl if direction == "buy"
+                   else float(bar["high"]) >= sl)
+            if not hit:
+                continue
+            fill = float(bar["open"])
+            if direction == "buy":
+                fill = fill if fill < sl else sl
+            else:
+                fill = fill if fill > sl else sl
+            _close_position(journal=journal, pos=pos, exit_price=fill,
+                            exit_ts=int(bar["time"]), reason="SL")
+            _clear_open_position(pos_path)
+            pos = None
+            break
+
+    # --- signal on the last closed bar only ---
+    sig = evaluate_last_bar(closed, warmup=warmup, max_dist=max_dist,
+                            min_sep=min_sep)
+    if sig is None:
+        logger.info(
+            "scan cycle complete: %d symbol(s), no Phil+RUDY signal on "
+            "the last closed bar", len(snapshots))
+        return result
+
+    direction = "buy" if sig["dir"] == 1 else "sell"
+    entry = float(sig["close"])
+    sl = entry - stop_usd if direction == "buy" else entry + stop_usd
+    cross_word = "above" if direction == "buy" else "below"
+    reasoning = (
+        f"Phil v2 {direction.upper()}: 21 crossed {cross_word} 55 "
+        f"(21 ${sig['ma21']:.2f} vs 55 ${sig['ma55']:.2f}); close "
+        f"${entry:.2f} is ${abs(entry - sig['ma55']):.2f} from the 55 "
+        f"(max $20.00); 8/13 gap ${abs(sig['ma8'] - sig['ma13']):.2f} "
+        f"(min $0.75); RUDY itrend {int(sig['itrend']):+d} agrees. "
+        f"Entry = signal-bar close; SL ${sl:.2f} ($10.00); no "
+        f"take-profit — exit at the opposite Phil+RUDY signal (flip). "
+        f"Confidence 0.48 = backtested win rate, not a prediction."
+    )
+
+    # --- dedup by signal-bar epoch ---
+    for row in journal.list_decisions(limit=1000, symbol="XAUUSD"):
+        if (row.get("action") == "propose" and row.get("approved")
+                and int(row.get("ts", -1)) == int(sig["epoch"])):
+            result["duplicates"] += 1
+            logger.info("duplicate signal bar %s ignored", sig["epoch"])
+            return result
+    if pos is not None and int(pos["bar_epoch"]) == int(sig["epoch"]):
+        result["duplicates"] += 1
+        logger.info("duplicate signal bar %s ignored (position open)",
+                    sig["epoch"])
+        return result
+
+    def _reject(reason: str) -> dict:
+        journal.record_decision(
+            symbol="XAUUSD", action="no_trade", playbook=PLAYBOOK,
+            confidence=CONFIDENCE, risk_pct=1.0, reasoning=reasoning,
+            approved=False, reject_reasons=[reason],
+            ts=int(sig["epoch"]))
+        result["decisions"] += 1
+        result["rejected"] += 1
+        logger.info("signal rejected: %s", reason)
+        return result
+
+    # --- gates, in order ---
+    if Path(cfg.paths.kill_switch_path).exists():
+        return _reject("kill switch engaged")
+    if blackout is not None:
+        return _reject(
+            f"news blackout: {blackout.title} ({blackout.currency}) at "
+            f"{blackout.time_utc:%H:%M} UTC")
+    start_ts, _ = journal.today_utc_window()
+    approved_today = [
+        d for d in journal.list_decisions(limit=1000, since_ts=start_ts)
+        if d.get("action") == "propose" and d.get("approved")
+    ]
+    max_per_day = int(
+        getattr(getattr(cfg, "signals", None), "max_signals_per_day", 5))
+    if len(approved_today) >= max_per_day:
+        return _reject(f"max signals per day ({max_per_day}) reached")
+    realized_today = sum(
+        (r.get("profit") or 0.0)
+        for r in journal.list_positions_history(since_ts=start_ts)
+    )
+    balance = float(
+        getattr(getattr(cfg, "signals", None),
+                "hypothetical_balance_usd", 10000.0))
+    loss_limit = (-float(getattr(getattr(cfg, "risk", None),
+                                 "max_daily_loss_pct", 3.0))
+                  / 100.0 * balance)
+    if realized_today <= loss_limit:
+        return _reject(
+            f"daily loss halt: realised ${realized_today:.2f} today "
+            f"(limit ${loss_limit:.2f})")
+
+    # --- same-direction signal while open is ignored ---
+    if pos is not None and pos["direction"] == direction:
+        logger.info("same-direction %s signal while %s open ignored",
+                    direction, direction)
+        return result
+
+    # --- opposite signal while open: flip close, then open the new one ---
+    if pos is not None:
+        profit = _close_position(journal=journal, pos=pos,
+                                 exit_price=entry,
+                                 exit_ts=int(sig["epoch"]), reason="FLIP")
+        risk_usd_old = (float(pos["lots"]) * 100.0
+                        * abs(float(pos["entry"]) - float(pos["stop_loss"])))
+        r_value = profit / risk_usd_old if risk_usd_old else None
+        _write_flip_history(cfg, journal, int(pos["decision_id"]),
+                            int(sig["epoch"]), entry, r_value,
+                            risk_usd_old, float(pos["lots"]))
+        _clear_open_position(pos_path)
+        pos = None
+
+    lots = position_size(equity=balance, risk_pct=1.0, entry=entry,
+                         stop_loss=sl, symbol_info=XAUUSD_SPEC)
+    if lots <= 0:
+        return _reject("cannot size this trade (lots 0.0)")
+    risk_usd = lots * 100.0 * stop_usd
+    signal = Signal(
+        symbol="XAUUSD", direction=direction, entry=entry, stop_loss=sl,
+        take_profit=None, risk_pct=1.0, confidence=CONFIDENCE,
+        playbook=PLAYBOOK, reasoning=reasoning, source_feed=feed,
+        ts=int(sig["epoch"]), lots=lots, risk_usd=risk_usd,
+        per_dollar_usd=lots * 100.0)
+    decision_id = journal.record_decision(
+        symbol="XAUUSD", action="propose", playbook=PLAYBOOK,
+        confidence=CONFIDENCE, risk_pct=1.0, reasoning=reasoning,
+        approved=True,
+        raw_llm_json=_json.dumps({
+            "direction": direction, "price": entry, "stop_loss": sl,
+            "take_profit": None, "risk_pct": 1.0,
+        }),
+        ts=int(sig["epoch"]))
+    _save_open_position(pos_path, {
+        "bar_epoch": int(sig["epoch"]), "decision_id": decision_id,
+        "direction": direction, "entry": entry, "stop_loss": sl,
+        "lots": lots,
+    })
+    if telegram is not None and telegram.enabled:
+        try:
+            telegram.send_message(format_signal_text(signal))
+        except Exception as exc:  # noqa: BLE001 - alert never breaks a cycle
+            logger.warning("Telegram alert failed: %s", exc)
+    result["decisions"] += 1
+    result["signals"] += 1
+    logger.info("signal: %s XAUUSD @ %.2f SL %.2f lots %.2f (decision %d)",
+                direction, entry, sl, lots, decision_id)
+    return result
 
 
 

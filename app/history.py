@@ -28,7 +28,7 @@ SNAPSHOT_FILENAME = "history_snapshot.json"
 ARCHIVE_FILENAME = "signal_history.jsonl"
 HISTORY_CAP = 100
 
-_OUTCOMES = ("OPEN", "TP", "SL")
+_OUTCOMES = ("OPEN", "TP", "SL", "FLIP")
 _DIRECTIONS = ("buy", "sell")
 
 
@@ -52,9 +52,19 @@ def valid_record(rec: Any) -> bool:
         return False
     if rec.get("direction") not in _DIRECTIONS:
         return False
-    for key in ("entry", "stop_loss", "take_profit"):
+    # entry / stop_loss are always numbers. take_profit may be None:
+    # phil-rudy-v2 has no take-profit (flip exit), and None must stay
+    # None through the snapshot/archive round-trip.
+    for key in ("entry", "stop_loss"):
         if not isinstance(rec.get(key), (int, float)):
             return False
+    if rec.get("take_profit") is not None and not isinstance(
+        rec.get("take_profit"), (int, float)
+    ):
+        return False
+    # FLIP = closed at the opposite signal (flip exit); its r is the
+    # realised R of the flip close (profit / risk_usd), positive on a
+    # winning flip, negative otherwise.
     if rec.get("status") not in _OUTCOMES:
         return False
     if rec.get("r") is not None and not isinstance(rec.get("r"), (int, float)):

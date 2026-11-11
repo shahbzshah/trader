@@ -3,23 +3,22 @@
 Rules-based **signals-only** bot for gold (XAUUSD). No MT5, no trade
 execution, no broker account.
 
-It watches gold on a schedule, keeps the feed warm and serves a live
-dark-theme web dashboard. **The strategy was removed on 2026-11-04
-(Megah's order): no strategy runs, no decisions are made, no signals
-fire until the new approach lands.** What remains is the plumbing the
-next strategy plugs into: live feeds (OANDA Practice main, Deriv
-fallback), technical snapshots (EMAs, RSI, ATR, swing levels, fair
-value gaps, liquidity sweeps, market structure), paper sizing against
-a **configured hypothetical balance** (default $10,000 — no real money
-anywhere), the journal + signal ledger, Telegram alerting, a kill
-switch, and a pre-flight `doctor` command.
+It watches gold on a schedule, runs the **phil-rudy-v2** strategy
+(Phil v2 triangles filtered by RUDY's internal trend — live
+2026-11-11, Megah's order "combine the 2"), and serves a live
+dark-theme web dashboard. What the bot has: live feeds (OANDA
+Practice main, Deriv fallback), technical snapshots (EMAs, RSI, ATR,
+swing levels, fair value gaps, liquidity sweeps, market structure),
+paper sizing against a **configured hypothetical balance** (default
+$10,000 — no real money anywhere), the journal + signal ledger,
+Telegram alerting, a kill switch, and a pre-flight `doctor` command.
 
 ## Safety model (non-negotiable)
 
 | Invariant | Enforcement |
 |---|---|
 | **Signals only — never trades** | There is no order-placement code anywhere. `app/executor.py` and `app/mt5_client.py` were deleted; no module imports MetaTrader5. A signal is a message, not an order. |
-| **No strategy, no signals** | The strategy was removed 2026-11-04. Nothing in the codebase can produce a decision or a signal until the new approach lands — the scan loop only keeps the feed warm and refreshes dashboard candles. |
+| **No strategy, no signals** | The old sweep+FVG strategy was removed 2026-11-04. The live strategy is phil-rudy-v2 (2026-11-11): Phil v2 triangles only when RUDY's internal trend agrees, $10 stop, no take-profit (flip exit). Rules in `app/strategy.py` + `knowledge/playbooks/phil_rudy_v2.md`. |
 | **Kill switch** | Flag file `data/KILL_SWITCH` + `kill`/`resume` CLI commands + dashboard buttons. Checked by the risk gate before every signal; the dashboard shows a red banner while engaged. |
 | **Secrets never leak** | OANDA + Telegram credentials live only in `.env` (gitignored) or the Render dashboard. They are never printed, logged, or committed. The Deriv fallback needs no credentials at all. |
 | **Paper sizing** | Every signal prints risk$ and lots computed from `signals.hypothetical_balance_usd` (default $10,000) at `risk.max_risk_pct_per_trade` (default 1%): lots = risk$ / (SL$ x 100) for gold (1 lot = 100 oz). |
@@ -80,20 +79,24 @@ python -m app.main serve                 # scan loop + dashboard on $PORT (Rende
 | `python -m app.main kill` / `resume` | Engage / release the kill switch. |
 | `python -m app.main review [--day YYYY-MM-DD]` | Daily report to `reports/`: stats, every journaled decision + reasoning, deterministic advisory proposals. |
 
-## Strategy: REMOVED 2026-11-04
+## Strategy: phil-rudy-v2 (live 2026-11-11)
 
-The sweep + FVG reclaim strategy (`app/strategy.py`,
-`knowledge/playbooks/sweep_fvg_reclaim.md`) was removed on Megah's
-order. The aim is to capture any move, not just one setup — the new
-approach is his to explain next.
+Megah's order 2026-11-11: "combine the 2". The bot takes a Phil v2
+triangle (21 crosses 55, 8 on the right side of 13, close within $20
+of the 55, 8/13 at least $0.75 apart) **only when RUDY's internal
+trend agrees** — see `app/strategy.py` and
+`knowledge/playbooks/phil_rudy_v2.md`.
 
-Until it lands: the bot keeps the feed warm, serves the dashboard and
-journals nothing new. The news blackout still applies to the scan
-loop (no signals within ±30 min of a high-impact USD event; free
-ForexFactory calendar feed, cached to `data/news_cache.json`,
-fail-open with a logged warning; see `news:` in `config.yaml`) —
-it just has no decisions to stand down at the moment. Weekends are
-still skipped (no Deriv gold ticks).
+Backtested on frozen Deriv frxXAUUSD M15 (24 Feb–10 Nov 2026):
+151 signals, 100 trades, 48.0% win, +$15.95/trade (no stop); with
+Megah's $10 stop — the live version — 139 trades, 20.1% win,
++$7.60/trade, total +$1,056.61. Entry at the signal-bar close, SL
+$10, **no take-profit** (winners exit at the opposite filtered
+signal — the flip), one position max, no breakeven manager. The news
+blackout still applies (no signals within ±30 min of a high-impact
+USD event; free ForexFactory calendar feed, cached to
+`data/news_cache.json`, fail-open with a logged warning; see `news:`
+in `config.yaml`). Weekends are still skipped (no Deriv gold ticks).
 
 ## Configuration highlights (`config.yaml`)
 
@@ -123,11 +126,7 @@ Keep the service awake with a 5-minute pinger (e.g. UptimeRobot) on
 ## Knowledge pack
 
 - `knowledge/risk_rules.md` — risk invariants (caps, demo-only, kill switch).
-- `knowledge/risk_rules.md` — risk invariants (caps, demo-only, kill switch).
-
-The playbook for the removed strategy is gone with it. Review-report
-proposals are advisory only; nothing in `knowledge/` is ever edited
-automatically.
+- `knowledge/playbooks/phil_rudy_v2.md` — the live strategy's exact rules + backtested numbers.
 
 ## Project structure
 

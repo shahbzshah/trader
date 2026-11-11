@@ -158,13 +158,15 @@ def create_app(
         "news_cache": {"ts": 0.0, "data": None},
         "candles_cache": {"ts": 0.0, "data": None},
         # Signal id -> resolved outcome {"status", "close_ts",
-        # "close_price", "r"}; once a signal hits TP/SL it never changes.
-        # Seeded from the restored snapshot so resolved signals stay
-        # resolved across a restart.
+        # "close_price", "r"}; once a signal hits TP/SL/FLIP it never
+        # changes. Seeded from the restored snapshot so resolved
+        # signals stay resolved across a restart — including FLIP
+        # closes written by the runner (a FLIP must never revert to
+        # OPEN on a later poll).
         "resolved_outcomes": {
             r["id"]: {"status": r["status"], "close_ts": r.get("close_ts"),
                       "close_price": r.get("close_price"), "r": r.get("r")}
-            for r in _history_records if r["status"] in ("TP", "SL")
+            for r in _history_records if r["status"] in ("TP", "SL", "FLIP")
         },
         # Last time a feed build/connect failed; retries are throttled so
         # a dead feed cannot make /health (polled by a pinger) hang.
@@ -528,11 +530,16 @@ def create_app(
         timestamp: the first candle whose range touches TP or SL decides.
         When both are touched in one candle, the level nearer the candle
         open is taken as hit first. A signal with no touch in the
-        available history stays OPEN (history only reaches back days)."""
+        available history stays OPEN (history only reaches back days).
+
+        phil-rudy-v2 signals have NO take-profit (take_profit None):
+        they are resolved on the stop loss only — a candle through the
+        SL closes at the SL (-1.0R); the flip exit is recorded by the
+        runner as a FLIP outcome in the history, not derived here."""
         entry, sl, tp = sig["entry"], sig["stop_loss"], sig["take_profit"]
         empty = {"status": "OPEN", "close_ts": None,
                  "close_price": None, "r": None}
-        if entry is None or sl is None or tp is None:
+        if entry is None or sl is None:
             return empty
         direction = (sig.get("direction") or "").lower()
         if direction not in ("buy", "sell"):
@@ -544,10 +551,10 @@ def create_app(
                 continue
             if direction == "buy":
                 hit_sl = c["low"] <= sl
-                hit_tp = c["high"] >= tp
+                hit_tp = tp is not None and c["high"] >= tp
             else:
                 hit_sl = c["high"] >= sl
-                hit_tp = c["low"] <= tp
+                hit_tp = tp is not None and c["low"] <= tp
             if hit_sl and hit_tp:
                 if abs(c["open"] - sl) <= abs(c["open"] - tp):
                     hit_tp = False
@@ -562,11 +569,23 @@ def create_app(
         return empty
 
     def _evaluate_outcomes(signals: list[dict]) -> dict[int, dict]:
-        """Signal id -> outcome dict. Resolved (TP/SL) outcomes are
-        memoized forever; open ones are re-checked against fresh
-        candles on each call."""
+        """Signal id -> outcome dict. Resolved (TP/SL/FLIP) outcomes
+        are memoized forever; open ones are re-checked against fresh
+        candles on each call. A terminal outcome already in the
+        durable history (written by the runner for a FLIP, or by a
+        previous poll for TP/SL) is trusted as-is and never
+        re-derived — a FLIP must never revert to OPEN."""
         resolved: dict = state["resolved_outcomes"]
+        history: dict[int, dict] = state["history"]
         out: dict[int, dict] = {}
+        for s in signals:
+            rec = history.get(s["id"])
+            if rec is not None and rec.get("status") in ("TP", "SL", "FLIP"):
+                out[s["id"]] = {"status": rec["status"],
+                                "close_ts": rec.get("close_ts"),
+                                "close_price": rec.get("close_price"),
+                                "r": rec.get("r")}
+                resolved[s["id"]] = out[s["id"]]
         pending = [s for s in signals if s["id"] not in resolved]
         if pending:
             candles = _candles_m15()
@@ -650,6 +669,12 @@ def create_app(
                             "explanation_ts"):
                     if rec.get(key) is not None:
                         sig[key] = rec[key]
+                # A terminal outcome in the durable history wins over
+                # the journal-derived OPEN: the runner writes FLIP
+                # closes there, and they must survive every poll.
+                if rec.get("status") in ("TP", "SL", "FLIP"):
+                    for key in ("status", "close_ts", "close_price", "r"):
+                        sig[key] = rec.get(key)
             signals.append(sig)
             seen_ids.add(sig["id"])
         # Restored history: records whose journal row is gone (redeploy
@@ -666,23 +691,24 @@ def create_app(
         """Outcome of one still-open signal against the latest tick
         mid-price: a tick through TP/SL resolves immediately instead of
         waiting for the next M15 candle to close. Returns None when the
-        tick touches neither level."""
+        tick touches neither level. phil-rudy-v2 signals have no TP:
+        only the stop loss is checked."""
         entry, sl, tp = sig["entry"], sig["stop_loss"], sig["take_profit"]
-        if entry is None or sl is None or tp is None:
+        if entry is None or sl is None:
             return None
         direction = (sig.get("direction") or "").lower()
         if direction not in ("buy", "sell"):
             return None
         rr = sig.get("rr")
         if direction == "buy":
-            if mid >= float(tp):
+            if tp is not None and mid >= float(tp):
                 return {"status": "TP", "close_ts": tick_ts,
                         "close_price": float(tp), "r": rr}
             if mid <= float(sl):
                 return {"status": "SL", "close_ts": tick_ts,
                         "close_price": float(sl), "r": -1.0}
         else:
-            if mid <= float(tp):
+            if tp is not None and mid <= float(tp):
                 return {"status": "TP", "close_ts": tick_ts,
                         "close_price": float(tp), "r": rr}
             if mid >= float(sl):
@@ -698,7 +724,25 @@ def create_app(
         poll re-checks open signals, so a TP/SL touch resolves within
         one poll instead of waiting for an on-demand call. Newly seen
         or newly resolved signals are persisted to the history
-        archive + snapshot."""
+        archive + snapshot.
+
+        The runner writes FLIP closes to the same snapshot file while
+        this server runs, so each call first re-reads the snapshot's
+        terminal records: a FLIP written since the last poll is
+        picked up here and then memoized, and never overwritten with
+        OPEN by the candle re-check below."""
+        try:
+            for rec in load_snapshot(state["history_snapshot_path"]):
+                if rec.get("status") in ("TP", "SL", "FLIP"):
+                    state["history"][rec["id"]] = rec
+                    state["resolved_outcomes"][rec["id"]] = {
+                        "status": rec["status"],
+                        "close_ts": rec.get("close_ts"),
+                        "close_price": rec.get("close_price"),
+                        "r": rec.get("r"),
+                    }
+        except Exception:  # noqa: BLE001 - stale memory is fail-soft
+            pass
         outcomes = _evaluate_outcomes(signals)
         if tick is None:
             tick = _tick_block()
@@ -744,9 +788,12 @@ def create_app(
         has closed; counts and net R are honest zeros when empty."""
         total = len(signals)
         closed = [s for s in signals
-                  if outcomes.get(s["id"], {}).get("status") in ("TP", "SL")]
+                  if outcomes.get(s["id"], {}).get("status")
+                  in ("TP", "SL", "FLIP")]
+        # A win is a closed trade with positive R: TP always, FLIP
+        # when the flip close was profitable, never SL (-1.0R).
         wins = [s for s in closed
-                if outcomes[s["id"]]["status"] == "TP"]
+                if float(outcomes[s["id"]].get("r") or 0.0) > 0]
         losses = len(closed) - len(wins)
         net_r = round(sum(
             float(outcomes[s["id"]]["r"] or 0.0) for s in closed
@@ -872,11 +919,28 @@ def create_app(
         risk_cfg = getattr(cfg, "risk", None)
         sig_cfg = getattr(cfg, "signals", None)
         session_cfg = getattr(cfg, "session_hours", None)
+        strat_cfg = getattr(cfg, "strategy", None)
+        phil_cfg = getattr(strat_cfg, "phil_rudy", None) if strat_cfg else None
         return _gzip_response(
             request,
             {
                 "mode": cfg.mode,
                 "feed": getattr(sig_cfg, "feed", "auto"),
+                "strategy": {
+                    "name": getattr(strat_cfg, "name", "phil-rudy-v2"),
+                    "phil_rudy": {
+                        "max_dist_usd": float(
+                            getattr(phil_cfg, "max_dist_usd", 20.0)),
+                        "min_sep_813_usd": float(
+                            getattr(phil_cfg, "min_sep_813_usd", 0.75)),
+                        "stop_usd": float(
+                            getattr(phil_cfg, "stop_usd", 10.0)),
+                        "warmup_bars": int(
+                            getattr(phil_cfg, "warmup_bars", 300)),
+                        "history_bars": int(
+                            getattr(phil_cfg, "history_bars", 400)),
+                    },
+                },
                 "live_feed": _feed_block().get("name"),
                 "symbols": list(cfg.symbols),
                 "timeframes": list(cfg.timeframes),

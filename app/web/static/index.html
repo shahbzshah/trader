@@ -302,8 +302,9 @@
 </div>
 <div class="flex flex-wrap gap-x-3 gap-y-0.5 font-label-sm text-label-sm text-outline" id="chart-legend">
 <span><span class="inline-block w-2 h-2 rounded-full bg-primary align-middle"></span> Entry</span>
-<span><span class="inline-block w-2 h-2 rounded-full bg-secondary align-middle"></span> TP1 / TP2</span>
+<span><span class="inline-block w-2 h-2 rounded-full bg-secondary align-middle"></span> 1R level</span>
 <span><span class="inline-block w-2 h-2 rounded-full bg-error align-middle"></span> SL</span>
+<span class="text-on-surface-variant">Exit: opposite signal (flip) — no TP line</span>
 <span id="chart-updated-label">—</span>
 </div>
 </section>
@@ -652,6 +653,8 @@ No decisions logged yet.
         ? '<span class="bg-secondary text-on-secondary font-ticker-md text-label-sm px-2 py-0.5 rounded font-bold tracking-wider">HIT TP</span>'
         : status === 'SL'
         ? '<span class="bg-error text-on-error font-ticker-md text-label-sm px-2 py-0.5 rounded font-bold tracking-wider">HIT SL</span>'
+        : status === 'FLIP'
+        ? '<span class="bg-primary text-on-primary font-ticker-md text-label-sm px-2 py-0.5 rounded font-bold tracking-wider">CLOSED (FLIP)</span>'
         : '<span class="bg-secondary text-on-secondary font-ticker-md text-label-sm px-2 py-0.5 rounded font-bold tracking-wider">OPEN</span>';
       const slDist = (sig.entry != null && sig.stop_loss != null) ? Math.abs(sig.entry - sig.stop_loss) : null;
       const tpDist = (sig.entry != null && sig.take_profit != null) ? Math.abs(sig.take_profit - sig.entry) : null;
@@ -670,8 +673,12 @@ No decisions logged yet.
         + '<span class="font-ticker-md text-ticker-md text-error font-bold">' + fmt(sig.stop_loss) + '</span>'
         + '<span class="text-[9px] font-mono text-outline block">' + (slPips != null ? '-' + slPips + ' pips (-$' + fmt(slDist) + ')' : '—') + '</span></div>'
         + '<div><span class="text-label-sm font-label-sm text-secondary block">TAKE PROFIT</span>'
-        + '<span class="font-ticker-md text-ticker-md text-secondary font-bold">' + fmt(sig.take_profit) + '</span>'
-        + '<span class="text-[9px] font-mono text-outline block">' + (tpPips != null ? '+' + tpPips + ' pips (+$' + fmt(tpDist) + ')' : '—') + '</span></div></div>'
+        + (sig.take_profit != null
+          ? '<span class="font-ticker-md text-ticker-md text-secondary font-bold">' + fmt(sig.take_profit) + '</span>'
+          + '<span class="text-[9px] font-mono text-outline block">' + (tpPips != null ? '+' + tpPips + ' pips (+$' + fmt(tpDist) + ')' : '—') + '</span>'
+          : '<span class="font-ticker-md text-ticker-md text-secondary font-bold">None</span>'
+          + '<span class="text-[9px] font-mono text-outline block">exit at opposite signal (flip)</span>')
+        + '</div></div>'
         + '<div class="grid grid-cols-4 gap-1 text-center font-label-sm text-label-sm pt-1 border-t border-surface-variant">'
         + '<div class="bg-surface-container-high py-1 px-1 rounded"><span class="text-outline text-[9px] block">R:R RATIO</span>'
         + '<span class="text-primary font-bold">' + (sig.rr != null ? '1 : ' + sig.rr.toFixed(2) : '—') + '</span></div>'
@@ -690,7 +697,7 @@ No decisions logged yet.
         + '<div class="flex justify-between text-[10px] font-label-sm text-outline">'
         + '<span>SL: ' + fmt(sig.stop_loss) + '</span>'
         + '<span class="text-primary font-bold" id="pnl-position-text">—</span>'
-        + '<span>TP: ' + fmt(sig.take_profit) + '</span></div></div></section>';
+        + '<span>' + (sig.take_profit != null ? 'TP: ' + fmt(sig.take_profit) : 'TP: none (flip exit)') + '</span></div></div></section>';
     }
 
     function renderHero() {
@@ -700,7 +707,7 @@ No decisions logged yet.
           + '<div class="flex items-center justify-between"><div class="flex items-center gap-2">'
           + '<span class="bg-surface-container-high text-outline font-ticker-md text-label-sm px-2 py-0.5 rounded font-bold tracking-wider border border-surface-variant">WAITING</span>'
           + '<span class="font-headline-md text-headline-md text-on-surface font-bold">LATEST SIGNAL</span></div></div>'
-          + '<p class="font-body-sm text-body-sm text-on-surface-variant">No signals yet — the bot is watching XAU/USD. New setups will appear here with entry, stop-loss and take-profit.</p></section>';
+          + '<p class="font-body-sm text-body-sm text-on-surface-variant">No signals yet — the bot is watching XAU/USD. New setups will appear here with entry and stop-loss (no take-profit — winners exit at the opposite signal).</p></section>';
         latestSignalId = null;
         return;
       }
@@ -719,14 +726,14 @@ No decisions logged yet.
       const barEl = $('pnl-bar-fill');
       const posEl = $('pnl-position-text');
       if (!valEl || !rEl || !barEl || !posEl) return;
-      if (sig.status === 'TP' || sig.status === 'SL') {
+      if (sig.status === 'TP' || sig.status === 'SL' || sig.status === 'FLIP') {
         const r = sig.r;
         const usd = (r != null && sig.risk_usd != null) ? r * sig.risk_usd : null;
         valEl.textContent = fmtMoney(usd);
         valEl.className = 'font-ticker-md text-ticker-md font-bold ' + (r != null && r >= 0 ? 'text-secondary' : 'text-error');
         rEl.textContent = (r != null ? (r >= 0 ? '+' : '') + r.toFixed(2) + ' R' : '—');
-        barEl.style.width = sig.status === 'TP' ? '100%' : '0%';
-        posEl.textContent = sig.status === 'TP' ? 'Take-profit hit' : 'Stop-loss hit';
+        barEl.style.width = sig.status === 'TP' ? '100%' : sig.status === 'FLIP' ? (r != null && r >= 0 ? '100%' : '0%') : '0%';
+        posEl.textContent = sig.status === 'TP' ? 'Take-profit hit' : sig.status === 'FLIP' ? 'Closed at opposite signal (flip)' : 'Stop-loss hit';
         return;
       }
       const r = unrealizedR(sig, lastPrice);
@@ -755,6 +762,7 @@ No decisions logged yet.
       let netUsd = 0;
       signals.forEach((s) => {
         if (s.status === 'TP' && s.r != null && s.risk_usd != null) netUsd += s.r * s.risk_usd;
+        else if (s.status === 'FLIP' && s.r != null && s.risk_usd != null) netUsd += s.r * s.risk_usd;
         else if (s.status === 'SL' && s.risk_usd != null) netUsd -= s.risk_usd;
       });
       $('stat-netusd').textContent = fmtMoney(netUsd);
@@ -771,6 +779,9 @@ No decisions logged yet.
         let outcome;
         if (s.status === 'TP') {
           outcome = '<span class="text-secondary font-label-sm text-label-sm font-bold bg-secondary-container/30 px-1.5 py-0.5 rounded border border-secondary/40">HIT TP (' + (s.r != null ? '+' + s.r.toFixed(2) + 'R' : '') + (s.r != null && s.risk_usd != null ? ' / ' + fmtMoney(s.r * s.risk_usd) : '') + ')</span>';
+        } else if (s.status === 'FLIP') {
+          const flipWin = s.r != null && s.r > 0;
+          outcome = '<span class="' + (flipWin ? 'text-secondary' : 'text-error') + ' font-label-sm text-label-sm font-bold bg-secondary-container/30 px-1.5 py-0.5 rounded border border-secondary/40">CLOSED FLIP (' + (s.r != null ? (s.r >= 0 ? '+' : '') + s.r.toFixed(2) + 'R' : '') + (s.r != null && s.risk_usd != null ? ' / ' + fmtMoney(s.r * s.risk_usd) : '') + ')</span>';
         } else if (s.status === 'SL') {
           outcome = '<span class="text-error font-label-sm text-label-sm font-bold bg-error-container/30 px-1.5 py-0.5 rounded border border-error/40">HIT SL (-1.00R' + (s.risk_usd != null ? ' / ' + fmtMoney(-s.risk_usd) : '') + ')</span>';
         } else {
@@ -787,7 +798,7 @@ No decisions logged yet.
           + outcome + '</div>'
           + '<div class="flex justify-between text-label-sm font-label-sm text-outline bg-surface-container-lowest px-2 py-1 rounded border border-surface-variant">'
           + '<span>SL: <strong class="text-on-surface font-mono">' + fmt(s.stop_loss) + '</strong></span>'
-          + '<span>TP: <strong class="text-on-surface font-mono">' + fmt(s.take_profit) + '</strong></span>'
+          + '<span>' + (s.take_profit != null ? 'TP: <strong class="text-on-surface font-mono">' + fmt(s.take_profit) + '</strong>' : 'TP: <strong class="text-on-surface font-mono">none (flip)</strong>') + '</span>'
           + '<span class="text-on-surface-variant">' + durLabel + '</span></div></div>';
       }).join('');
     }
@@ -850,15 +861,17 @@ No decisions logged yet.
 
     function chartLevels() {
       const sig = latestSignal;
-      if (!sig || sig.entry == null || sig.stop_loss == null || sig.take_profit == null) return null;
-      if (sig.status === 'TP' || sig.status === 'SL') {
+      // No take-profit is fine: entry/SL still draw; TP2 only when a
+      // take-profit exists. (phil-rudy-v2 has none — flip exit.)
+      if (!sig || sig.entry == null || sig.stop_loss == null) return null;
+      if (sig.status === 'TP' || sig.status === 'SL' || sig.status === 'FLIP') {
         // Closed: only the exit marker remains.
         return { closed: true, status: sig.status, closePrice: sig.close_price, r: sig.r };
       }
       const dir = (sig.direction || '').toLowerCase();
       const slDist = Math.abs(sig.entry - sig.stop_loss);
       // TP1 = the 1R level (entry +/- one SL distance toward TP);
-      // TP2 = the signal's own take-profit.
+      // TP2 = the signal's own take-profit (null when there is none).
       const tp1 = dir === 'buy' ? sig.entry + slDist : sig.entry - slDist;
       return { closed: false, entry: sig.entry, sl: sig.stop_loss, tp1: tp1, tp2: sig.take_profit, ts: sig.ts };
     }
@@ -948,10 +961,10 @@ No decisions logged yet.
       }
       if (lv) {
         if (lv.closed) {
-          const col = lv.status === 'TP' ? '#4edea3' : '#ef4444';
+          const col = lv.status === 'SL' ? '#ef4444' : (lv.r != null && lv.r < 0 ? '#ef4444' : '#4edea3');
           levelLine(lv.closePrice, col, 'EXIT ' + fmt(lv.closePrice) + ' · ' + lv.status, []);
         } else {
-          levelLine(lv.tp2, '#4edea3', 'TP2 ' + fmt(lv.tp2));
+          if (lv.tp2 != null) levelLine(lv.tp2, '#4edea3', 'TP2 ' + fmt(lv.tp2));
           levelLine(lv.tp1, '#4edea3', 'TP1 ' + fmt(lv.tp1));
           levelLine(lv.entry, '#ffc174', 'ENTRY ' + fmt(lv.entry));
           levelLine(lv.sl, '#ef4444', 'SL ' + fmt(lv.sl));
@@ -1019,12 +1032,20 @@ No decisions logged yet.
       const news = c.news || {};
       const risk = c.risk || {};
       const sig = c.signals || {};
+      const strat = c.strategy || {};
+      const phil = strat.phil_rudy || {};
       $('config-body').innerHTML =
         cfgGroup('CONNECTION', cfgRow('Mode', c.mode || '—')
           + cfgRow('Feed', (c.feed || '—') + ' → live: ' + (c.live_feed || 'offline'))
           + cfgRow('Symbol', (c.symbols || []).join(', ') || '—')
           + cfgRow('Timeframe', c.timeframe || '—')
           + cfgRow('Scan interval', (c.scan_interval_minutes != null ? c.scan_interval_minutes + ' min' : '—')))
+        + cfgGroup('STRATEGY', cfgRow('Name', strat.name || '—')
+          + cfgRow('Max dist from 55', phil.max_dist_usd != null ? '$' + phil.max_dist_usd : '—')
+          + cfgRow('Min 8/13 separation', phil.min_sep_813_usd != null ? '$' + phil.min_sep_813_usd : '—')
+          + cfgRow('Stop loss', phil.stop_usd != null ? '$' + phil.stop_usd : '—')
+          + cfgRow('Take profit', 'None — flip exit')
+          + cfgRow('Warmup / history bars', (phil.warmup_bars != null ? phil.warmup_bars : '—') + ' / ' + (phil.history_bars != null ? phil.history_bars : '—')))
         + cfgGroup('SESSION & KILL ZONES', cfgRow('Session', (sh.start || '—') + '–' + (sh.end || '—') + ' ' + (sh.timezone || 'UTC') + (sh.skip_weekends ? ' · skips weekends' : ''))
           + cfgRow('Kill zones', (c.kill_zones && c.kill_zones.length) ? c.kill_zones.join(' · ') : 'None'))
         + cfgGroup('NEWS FILTER', cfgRow('Enabled', onOff(news.enabled))
@@ -1035,7 +1056,7 @@ No decisions logged yet.
           + cfgRow('Max daily loss', (risk.max_daily_loss_pct != null ? risk.max_daily_loss_pct + '%' : '—'))
           + cfgRow('Max trades / day', risk.max_trades_per_day != null ? String(risk.max_trades_per_day) : '—')
           + cfgRow('Min confidence', risk.min_confidence != null ? Number(risk.min_confidence).toFixed(2) : '—')
-          + cfgRow('Playbook', risk.default_playbook || '—')
+          + cfgRow('Playbook', strat.name || '—')
           + cfgRow('Breakeven', onOff(risk.breakeven_enabled) + (risk.breakeven_enabled && risk.breakeven_at_r != null ? ' @ ' + risk.breakeven_at_r + 'R' : '')))
         + cfgGroup('SIZING & ALERTS', cfgRow('Hypothetical balance', sig.hypothetical_balance_usd != null ? '$' + fmt(sig.hypothetical_balance_usd, 0) : '—')
           + cfgRow('Max signals / day', sig.max_signals_per_day != null ? String(sig.max_signals_per_day) : '—')

@@ -112,14 +112,19 @@ def format_signal_text(signal: Any) -> str:
     avoid a circular import).
     """
     arrow = "BUY" if signal.direction == "buy" else "SELL"
-    rr = signal.take_profit - signal.entry
     risk = abs(signal.entry - signal.stop_loss)
-    rr_ratio = abs(rr) / risk if risk > 0 else 0.0
+    if signal.take_profit is None:
+        tp_line = "Take profit: none — exit at opposite signal (flip)"
+    else:
+        rr = signal.take_profit - signal.entry
+        rr_ratio = abs(rr) / risk if risk > 0 else 0.0
+        tp_line = (f"Take profit: {signal.take_profit:.2f}  "
+                   f"({rr_ratio:.1f}R)")
     lines = [
         f"GOLD SIGNAL — {arrow} {signal.symbol}",
         f"Entry (limit): {signal.entry:.2f}",
         f"Stop loss: {signal.stop_loss:.2f}",
-        f"Take profit: {signal.take_profit:.2f}  ({rr_ratio:.1f}R)",
+        tp_line,
         "",
         f"Risk: ${signal.risk_usd:.2f}  •  Size: {signal.lots:.2f} lots",
         f"$ per $1 move: ${signal.per_dollar_usd:.2f}",

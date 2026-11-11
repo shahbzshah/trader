@@ -34,7 +34,9 @@ class Signal:
     direction: str
     entry: float
     stop_loss: float
-    take_profit: float
+    # None for phil-rudy-v2: the backtest has no take-profit — winners
+    # exit at the opposite filtered signal (flip). Never invent one.
+    take_profit: float | None
     risk_pct: float
     confidence: float
     playbook: str
