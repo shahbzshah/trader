@@ -6,6 +6,8 @@ Endpoints:
     GET  /api/signals   recent signaled setups (approved propose decisions)
     GET  /api/decisions?limit=
     GET  /api/candles   recent M15 candles (epoch/open/high/low/close)
+    GET  /api/shift     market-shift bell state: current RSI / arm +
+                       recent 5m shift events (Gold Watch app)
     GET  /api/config    read-only connection + risk params (no secrets)
     POST /explain       store an AI explanation on a signal record
     POST /api/kill
@@ -60,6 +62,7 @@ from app.journal import Journal
 from app.market_data import XAUUSD_SPEC
 from app.news import get_events, in_blackout
 from app.risk import position_size
+from app.shift import detect_shifts
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +160,10 @@ def create_app(
         "day_cache": {"ts": 0.0, "data": None},
         "news_cache": {"ts": 0.0, "data": None},
         "candles_cache": {"ts": 0.0, "data": None},
+        # M5 candles for the shift bell (same 60s TTL shape as the
+        # M15 cache above); the bell fetches on demand, it is not
+        # part of the bot's 15-minute strategy cycle.
+        "shift_cache": {"ts": 0.0, "data": None},
         # Signal id -> resolved outcome {"status", "close_ts",
         # "close_price", "r"}; once a signal hits TP/SL/FLIP it never
         # changes. Seeded from the restored snapshot so resolved
@@ -523,6 +530,24 @@ def create_app(
             except Exception:  # noqa: BLE001
                 rows = []
         state["candles_cache"] = {"ts": now, "data": rows}
+        return rows
+
+    def _candles_m5() -> list[dict]:
+        """M5 candles (up to 300), cached 60s, oldest first — the
+        shift bell's feed. Same fail-soft shape as _candles_m15."""
+        now = time.time()
+        cache = state["shift_cache"]
+        if now - cache["ts"] < _CANDLES_CACHE_TTL_S and cache["data"] is not None:
+            return cache["data"]
+        rows: list[dict] = []
+        client = _get_client()
+        if client is not None:
+            try:
+                rates = client.copy_rates("XAUUSD", "M5", 300)
+                rows = sorted(rates.rates, key=lambda r: r["time"])
+            except Exception:  # noqa: BLE001
+                rows = []
+        state["shift_cache"] = {"ts": now, "data": rows}
         return rows
 
     def _resolve_one(sig: dict, candles: list[dict]) -> dict:
@@ -910,6 +935,32 @@ def create_app(
             request,
             {"symbol": "XAUUSD", "timeframe": "M15",
              "candles": candles, "count": len(candles)})
+
+    @app.get("/api/shift")
+    def api_shift(request: Request) -> Response:
+        """Market-shift bell state for the Gold Watch app (public,
+        no key, like /api/state).
+
+        Replays the shift detector (app/shift.py — the same rule as
+        the TradingView bell) over the CLOSED M5 bars; the last bar
+        is still forming and is dropped. The bot's own cycle still
+        runs every 15 min — this endpoint fetches M5 on demand so
+        the bell is fresh. Signals-only: nothing here changes,
+        gates or delays any Phil+RUDY signal."""
+        feed = _feed_block()
+        rows = _candles_m5()
+        closed = rows[:-1] if rows else []
+        events, shift_state = detect_shifts(closed)
+        return _gzip_response(
+            request,
+            {
+                "ts": int(time.time()),
+                "feed_ok": bool(feed.get("feed_ok")),
+                "price": shift_state["last_close"],
+                "rsi": shift_state["rsi"],
+                "armed": shift_state["armed"],
+                "shifts": list(reversed(events[-20:])),
+            })
 
     @app.get("/api/config")
     def api_config(request: Request) -> Response:
